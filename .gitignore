@@ -1,0 +1,33 @@
+# Python
+.venv/
+.venv_release/
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+
+# Local / IDE
+.cursor/
+.icon-cache/
+*.log
+
+# Build & packaging outputs
+build/
+build_*/
+dist/
+release_staging*/
+release_docs_staging/
+release_publish/
+*.zip
+*.spec.bak
+
+# Temp / extract leftovers
+_legal_source_extract.md
+_flag_test*.png
+_dist_exe_before.txt
+release_staging_inventory.txt
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
