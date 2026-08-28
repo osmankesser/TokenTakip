@@ -108,25 +108,27 @@ TEXTS_FALLBACK_EN = {
     "quota_hint": "Reads local sessions and asks only that service’s official quota API. Tokens are not stored or sent to the developer.",
     "chat_label": "Chat analysis for Ideas",
     "chat_hint": "Scans known local chat folders on this PC only. Nothing is uploaded. Documents and whole disks are not scanned.",
-    "consent_title": "About quota access",
+    "consent_title": "Before you start",
     "consent_body": (
-        "Token Tracker can read local Cursor, Codex, Claude, Gemini, and GitHub Copilot session data "
-        "and send it only to each service’s official quota API to show remaining usage.\n\n"
-        "Tokens are not sent to the developer and are not stored by this app.\n\n"
-        "While quota access is off, no session files are read and no quota requests are made. "
-        "You can change this later in Settings.\n\n"
-        "Ideas can analyze chat history separately; that stays off until you enable it in Settings."
+        "Token Tracker needs your permission to read local session and chat data on this PC.\n\n"
+        "Quota: reads Cursor, Codex, Claude, Gemini, and GitHub Copilot session data and asks only "
+        "each service’s official quota API. Tokens are not sent to the developer and are not stored.\n\n"
+        "Ideas: scans known local chat folders on this PC only. Nothing is uploaded.\n\n"
+        "You can turn these off later in Settings."
     ),
-    "consent_enable": "Enable quota access",
+    "consent_enable": "Accept and enable",
     "consent_later": "Keep disabled for now",
-    "license_title": "Software license",
+    "license_title": "Before you start",
     "license_body": (
-        "Before using Token Tracker you must review and accept the Software License Agreement. "
-        "Accepting the license does not enable quota access or chat analysis. "
-        "Those permissions are separate and off by default."
+        "Before using Token Tracker, review and accept the Software License Agreement and allow "
+        "local quota access and chat analysis.\n\n"
+        "Quota: reads local session data and asks only each service’s official quota API. "
+        "Tokens are not sent to the developer and are not stored.\n\n"
+        "Ideas: scans known local chat folders on this PC only. Nothing is uploaded.\n\n"
+        "You can turn these off later in Settings."
     ),
     "license_view": "View license text",
-    "license_accept": "I accept the license",
+    "license_accept": "Accept and continue",
     "license_reject": "I do not accept — exit",
     "license_missing": "License text was not found, so the application cannot start.",
     "usage_need_quota": "Quota access is off. Enable it in Settings.",
@@ -206,25 +208,27 @@ TEXTS: dict[str, dict[str, str]] = {
         "quota_hint": "Yerel oturumu okuyup yalnızca ilgili hizmetin resmî kota API’sine sorar. Token saklanmaz, geliştiriciye gitmez.",
         "chat_label": "Öneriler için sohbet analizi",
         "chat_hint": "Bilinen yerel sohbet klasörlerini yalnızca bu bilgisayarda tarar. İnternete gönderilmez. Documents veya tüm disk taranmaz.",
-        "consent_title": "Kota erişimi hakkında",
+        "consent_title": "Başlamadan önce",
         "consent_body": (
-            "Token Tracker, bilgisayarınızdaki Cursor, Codex, Claude, Gemini ve GitHub Copilot oturum bilgilerini "
-            "okuyarak yalnızca bu hizmetlerin resmî kota API’lerine istek atar ve kalan kullanımı gösterir.\n\n"
-            "Token’lar geliştiriciye veya başka bir sunucuya gönderilmez; uygulama bunları kalıcı saklamaz.\n\n"
-            "Kota erişimi kapalıyken hiçbir oturum dosyası okunmaz ve hiçbir kota isteği yapılmaz. "
-            "İzni istediğiniz zaman Ayarlar’dan açıp kapatabilirsiniz.\n\n"
-            "Öneriler için sohbet analizi ayrı bir izindir; varsayılan olarak kapalıdır ve yalnızca Ayarlar’dan açılır."
+            "Token Tracker, bu bilgisayardaki yerel oturum ve sohbet verilerini okumak için izninize ihtiyaç duyar.\n\n"
+            "Kota: Cursor, Codex, Claude, Gemini ve GitHub Copilot oturumlarını okuyup yalnızca resmî kota API’lerine sorar. "
+            "Token’lar geliştiriciye gitmez ve saklanmaz.\n\n"
+            "Öneriler: bilinen yerel sohbet klasörlerini yalnızca bu bilgisayarda tarar. İnternete gönderilmez.\n\n"
+            "Bunları istediğiniz zaman Ayarlar’dan kapatabilirsiniz."
         ),
-        "consent_enable": "Kota erişimini aç",
+        "consent_enable": "Kabul et ve aç",
         "consent_later": "Şimdilik kapalı bırak",
-        "license_title": "Yazılım lisansı",
+        "license_title": "Başlamadan önce",
         "license_body": (
-            "Token Tracker’i kullanmadan önce Yazılım Kullanım Lisansı’nı inceleyip kabul etmeniz gerekir. "
-            "Lisans kabulü, kota erişimini veya sohbet analizini açmaz. "
-            "Bu izinler ayrıca ve varsayılan olarak kapalıdır."
+            "Token Tracker’i kullanmadan önce Yazılım Kullanım Lisansı’nı inceleyip kabul edin; "
+            "yerel kota erişimi ve sohbet analizine izin verin.\n\n"
+            "Kota: yerel oturum verisini okuyup yalnızca ilgili hizmetin resmî kota API’sine sorar. "
+            "Token’lar geliştiriciye gitmez ve saklanmaz.\n\n"
+            "Öneriler: bilinen yerel sohbet klasörlerini yalnızca bu bilgisayarda tarar. İnternete gönderilmez.\n\n"
+            "Bunları istediğiniz zaman Ayarlar’dan kapatabilirsiniz."
         ),
         "license_view": "Lisans metnini görüntüle",
-        "license_accept": "Lisansı kabul ediyorum",
+        "license_accept": "Kabul et ve devam et",
         "license_reject": "Kabul etmiyorum ve çık",
         "license_missing": "Lisans metni bulunamadığı için uygulama başlatılamıyor.",
         "usage_need_quota": "Kota erişimi kapalı. Ayarlar’dan açınca kullanım bilgisi gelir.",
@@ -307,25 +311,27 @@ TEXTS: dict[str, dict[str, str]] = {
         "quota_hint": "Reads local sessions and asks only that service’s official quota API. Tokens are not stored or sent to the developer.",
         "chat_label": "Chat analysis for Ideas",
         "chat_hint": "Scans known local chat folders on this PC only. Nothing is uploaded. Documents and whole disks are not scanned.",
-        "consent_title": "About quota access",
+        "consent_title": "Before you start",
         "consent_body": (
-            "Token Tracker can read local Cursor, Codex, Claude, Gemini, and GitHub Copilot session data "
-            "and send it only to each service’s official quota API to show remaining usage.\n\n"
-            "Tokens are not sent to the developer and are not stored by this app.\n\n"
-            "While quota access is off, no session files are read and no quota requests are made. "
-            "You can change this later in Settings.\n\n"
-            "Ideas can analyze chat history separately; that stays off until you enable it in Settings."
+            "Token Tracker needs your permission to read local session and chat data on this PC.\n\n"
+            "Quota: reads Cursor, Codex, Claude, Gemini, and GitHub Copilot session data and asks only "
+            "each service’s official quota API. Tokens are not sent to the developer and are not stored.\n\n"
+            "Ideas: scans known local chat folders on this PC only. Nothing is uploaded.\n\n"
+            "You can turn these off later in Settings."
         ),
-        "consent_enable": "Enable quota access",
+        "consent_enable": "Accept and enable",
         "consent_later": "Keep disabled for now",
-        "license_title": "Software license",
+        "license_title": "Before you start",
         "license_body": (
-            "Before using Token Tracker you must review and accept the Software License Agreement. "
-            "Accepting the license does not enable quota access or chat analysis. "
-            "Those permissions are separate and off by default."
+            "Before using Token Tracker, review and accept the Software License Agreement and allow "
+            "local quota access and chat analysis.\n\n"
+            "Quota: reads local session data and asks only each service’s official quota API. "
+            "Tokens are not sent to the developer and are not stored.\n\n"
+            "Ideas: scans known local chat folders on this PC only. Nothing is uploaded.\n\n"
+            "You can turn these off later in Settings."
         ),
         "license_view": "View license text",
-        "license_accept": "I accept the license",
+        "license_accept": "Accept and continue",
         "license_reject": "I do not accept — exit",
         "license_missing": "License text was not found, so the application cannot start.",
         "usage_need_quota": "Quota access is off. Enable it in Settings.",

@@ -81,7 +81,7 @@ class LicenseGateTests(unittest.TestCase):
         self.assertTrue(win._license_granted)
         prompt.assert_not_called()
 
-    def test_accept_writes_only_license_ver(self) -> None:
+    def test_accept_grants_license_and_features(self) -> None:
         path = self._lic()
         win = UsageOverlay(
             auto_fetch=False,
@@ -92,11 +92,11 @@ class LicenseGateTests(unittest.TestCase):
         self.addCleanup(win.close)
         self.assertEqual(self._settings.value("license_accepted_ver"), LICENSE_DOC_VER)
         self.assertTrue(self._settings.value("license_accepted", False, type=bool))
-        self.assertFalse(self._settings.value("quota_access", False, type=bool))
-        self.assertFalse(self._settings.value("chat_analysis", False, type=bool))
-        self.assertFalse(self._settings.value("consent_seen", False, type=bool))
-        self.assertFalse(win._quota_access)
-        self.assertFalse(win._chat_analysis)
+        self.assertTrue(self._settings.value("quota_access", False, type=bool))
+        self.assertTrue(self._settings.value("chat_analysis", False, type=bool))
+        self.assertTrue(self._settings.value("consent_seen", False, type=bool))
+        self.assertTrue(win._quota_access)
+        self.assertTrue(win._chat_analysis)
 
     def test_reject_no_io_and_no_permission_write(self) -> None:
         path = self._lic()
@@ -130,7 +130,7 @@ class LicenseGateTests(unittest.TestCase):
     def test_close_same_as_reject(self) -> None:
         path = self._lic()
         text = path.read_text(encoding="utf-8")
-        with mock.patch.object(UsageOverlay, "_show_license_dialog", return_value=False) as dlg:
+        with mock.patch.object(UsageOverlay, "_show_startup_dialog", return_value=False) as dlg:
             win = UsageOverlay(auto_fetch=False, for_test=True, license_path=path)
             self.addCleanup(win.close)
             self.assertFalse(win._license_granted)

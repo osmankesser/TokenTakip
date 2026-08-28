@@ -1358,9 +1358,9 @@ class UsageOverlay(QWidget):
             self._consent_seen = True
             self._warn_pct, self._crit_pct = 40, 15
         else:
-            self._lang = str(self._settings.value("lang", "tr"))
+            self._lang = str(self._settings.value("lang", "en"))
             if self._lang not in LANG_CODES:
-                self._lang = "tr"
+                self._lang = "en"
             self._theme = str(self._settings.value("theme", "frost"))
             if self._theme not in THEMES:
                 self._theme = "frost"
@@ -1913,8 +1913,6 @@ class UsageOverlay(QWidget):
             return
         if not for_test:
             self.clock.start()
-        if not for_test and not self._consent_seen:
-            QTimer.singleShot(0, self._show_consent)
         if auto_fetch and self._quota_access:
             self.timer.start()
             QTimer.singleShot(0, self.refresh)
@@ -2799,7 +2797,7 @@ class UsageOverlay(QWidget):
         return bool(str(ver or "").strip())
 
     def _gate_license(self) -> bool:
-        if self._license_already_accepted():
+        if self._license_already_accepted() and self._consent_seen:
             return True
         text, err = read_license_text(self._license_path)
         if text is None:
@@ -2808,14 +2806,32 @@ class UsageOverlay(QWidget):
         accepted = (
             self._license_prompt(text)
             if self._license_prompt is not None
-            else self._show_license_dialog(text)
+            else self._show_startup_dialog(text)
         )
         if not accepted:
             return False
+        self._grant_startup()
+        return True
+
+    def _grant_startup(self) -> None:
         self._settings.setValue("license_accepted_ver", LICENSE_DOC_VER)
         self._settings.setValue("license_accepted", True)
+        self._quota_access = True
+        self._chat_analysis = True
+        self._consent_seen = True
+        self._settings.setValue("quota_access", True)
+        self._settings.setValue("chat_analysis", True)
+        self._settings.setValue("consent_seen", True)
         self._persist_settings()
-        return True
+        self.quota_btn.blockSignals(True)
+        self.quota_btn.setChecked(True)
+        self.quota_btn.blockSignals(False)
+        self.chat_btn.blockSignals(True)
+        self.chat_btn.setChecked(True)
+        self.chat_btn.blockSignals(False)
+        if self._auto_fetch and not self._for_test:
+            self.timer.start()
+            QTimer.singleShot(0, self.refresh)
 
     def _show_license_load_error(self, _err: str) -> None:
         box = QMessageBox(self)
@@ -2843,7 +2859,7 @@ class UsageOverlay(QWidget):
         lay.addWidget(buttons)
         dlg.exec()
 
-    def _show_license_dialog(self, text: str) -> bool:
+    def _show_startup_dialog(self, text: str) -> bool:
         box = QMessageBox(self)
         box.setWindowTitle(self.t("license_title"))
         box.setText(self.t("license_body"))
@@ -2859,30 +2875,6 @@ class UsageOverlay(QWidget):
                 self._show_license_text(text)
                 continue
             return clicked is accept
-
-    def _show_consent(self) -> None:
-        box = QMessageBox(self)
-        box.setWindowTitle(self.t("consent_title"))
-        box.setText(self.t("consent_body"))
-        box.setIcon(QMessageBox.Information)
-        enable = box.addButton(self.t("consent_enable"), QMessageBox.AcceptRole)
-        box.addButton(self.t("consent_later"), QMessageBox.RejectRole)
-        box.setDefaultButton(enable)
-        box.exec()
-        enabled = box.clickedButton() is enable
-        self._quota_access = enabled
-        self._consent_seen = True
-        self._settings.setValue("quota_access", enabled)
-        self._settings.setValue("consent_seen", True)
-        self._persist_settings()
-        self.quota_btn.blockSignals(True)
-        self.quota_btn.setChecked(enabled)
-        self.quota_btn.blockSignals(False)
-        if enabled and self._auto_fetch:
-            self.timer.start()
-            QTimer.singleShot(0, self.refresh)
-        elif self._page == "usage":
-            self.refresh()
 
     def _quota_changed(self, on: bool) -> None:
         self._quota_access = on
