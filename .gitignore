@@ -1,0 +1,32 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+
+# Local / IDE
+.cursor/
+.icon-cache/
+*.log
+.pytest_cache/
+
+# Build outputs
+build_out/
+release_out/
+release/
+_internal/
+/TokenTracker.exe
+
+# Gecici / debug
+_verify_flags/
+_flags_backup/
+_shot_*.py
+_dbg_*.png
+/_flag_*.png
+__pycache__/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store

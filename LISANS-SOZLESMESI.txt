@@ -1,0 +1,140 @@
+Token Tracker — Yazılım Kullanım Lisansı (Taslak)
+
+
+
+Yazılım: Token Tracker
+
+Sürüm: 0.1.2
+
+Yürürlük / yayın tarihi: 28.08.2026
+
+Hak sahibi / yayıncı: Token Tracker
+
+İletişim: keseryazilim@gmail.com
+
+Adres: [TEBLİGAT/İLETİŞİM ADRESİ]
+
+Resmî indirme: [RESMÎ İNDİRME SAYFASI]
+
+
+
+ÖNEMLİ: Bu metin hukuki bir taslaktır. Yayınlanmadan önce yetkin bir hukukçu tarafından incelenmeli ve gerekirse uyarlanmalıdır. Bu metin hukuki tavsiye değildir.
+
+
+
+1. Konu ve kabul
+
+Bu sözleşme, Token Tracker adlı Windows uygulamasının (bundan sonra “Yazılım”) ücretsiz kullanım koşullarını düzenler.
+
+Yazılım, ilk çalıştırmada bu lisans metnini gösterir. Kullanım için uygulama içindeki “Lisansı kabul ediyorum” seçeneğini onaylamanız gerekir.
+
+Yalnızca indirmiş, kurmuş veya çalıştırmış olmanız tek başına bu sözleşmenin kabulü sayılmaz.
+
+Kabul etmiyorsanız “Kabul etmiyorum ve çık” seçeneğini kullanın veya Yazılımı cihazınızdan kaldırın.
+
+Lisans kabulü; kota erişimini veya sohbet analizini açmaz. Bu izinler ayrıdır ve varsayılan olarak kapalıdır.
+
+
+
+2. Fikrî haklar
+
+Yazılımın özgün kodu, arayüzü, derlenmiş çıktısı ve bunlara ilişkin özgün içerikler üzerindeki fikrî ve sınai haklar, yürürlükteki mevzuat çerçevesinde Token Tracker’e aittir. Üçüncü taraf bileşenlere ilişkin haklar ilgili hak sahiplerine aittir; bu haklar saklıdır.
+
+
+
+3. Kullanım izni
+
+Hak sahibi size, ücretsiz, kişisel, sınırlı, münhasır olmayan ve devredilemez bir kullanım izni verir. Bu izin, Yazılımı kendi bilgisayarınızda çalıştırmanız içindir. Yazılımın mülkiyeti size devredilmez; yalnızca kullanım hakkı verilir.
+
+
+
+4. Yasaklar
+
+Aşağıdakiler, yazılı izin veya kanunun açıkça izin verdiği hâller saklı kalmak üzere yasaktır:
+
+a) Yazılımı satmak, kiralamak, ücret karşılığı hizmet olarak sunmak;
+
+b) Yazılımı geliştirici adına veya geliştiriciyi yanıltacak biçimde değiştirilmiş kopya olarak dağıtmak;
+
+c) Yazılımı başka bir indirme sitesinde veya platformda yeniden yayımlamak (yazılı izin gerekir);
+
+d) Yazılımı kötüye kullanarak başkalarının hesaplarına, oturumlarına veya sistemlerine yetkisiz erişim sağlamak.
+
+
+
+5. Tersine mühendislik ve LGPL istisnası
+
+Kanunen vazgeçilemeyecek haklarınız saklıdır.
+
+Ayrıca, GNU Lesser General Public License (LGPL) kapsamındaki PySide6, shiboken6, Qt ve diğer LGPL bileşenleri bakımından aşağıdaki işlemler bu sözleşmenin genel tersine mühendislik / değiştirme sınırlarının açık istisnasıdır ve engellenmez:
+
+a) Bu LGPL bileşenlerini değiştirmek;
+
+b) Değiştirilmiş, arayüzle uyumlu LGPL kütüphaneleriyle Yazılımı çalıştırmak;
+
+c) Bu değişikliklerde hata ayıklamak için gerekli tersine mühendislik;
+
+d) Kanunen izin verilen birlikte çalışabilirlik işlemleri.
+
+Yazılım, bu LGPL kütüphanelerini şifreleyerek, kilitleyerek veya bütünlük kontrolüyle değiştirilmesini engelleyecek biçimde paketlemez (onedir dağıtım).
+
+Token Tracker’in kendi özgün kapalı kaynak kodu LGPL kapsamına girmez; LGPL zorunlu kılmadığı sürece kaynak kod paylaşılmaz.
+
+Ayrıntılar: UCUNCU-TARAF-BILDIRIMLERI.txt, LGPL-NASIL-DEGISTIRILIR.txt, licenses/, SOURCES.txt.
+
+
+
+6. Üçüncü taraf bileşenler
+
+Yazılım, üçüncü taraf kütüphaneler içerir. Bunların lisansları kendi metinlerinde belirtilir; özet “UCUNCU-TARAF-BILDIRIMLERI.txt”, tam metinler “licenses/” klasöründedir. Bu bileşenlerin lisansları saklıdır ve bu sözleşme onları geçersiz kılmaz.
+
+LicenseRef-Qt-Commercial.txt ticari Qt lisans referansıdır; bu Community/LGPL dağıtımının ana lisansı değildir.
+
+
+
+7. “Olduğu gibi” sunum ve garanti sınırları
+
+Yazılım “olduğu gibi” ve “mevcut hâliyle” sunulur. Hak sahibi; kesintisiz, hatasız, güvenli veya tüm yapay zekâ sağlayıcılarıyla sürekli uyumlu çalışma konusunda açık veya zımnî bir garanti vermez. Harici uygulama, API, oturum biçimi veya sağlayıcı politika değişiklikleri nedeniyle kota okuma veya diğer özellikler bozulabilir, kısıtlanabilir veya çalışmayı durdurabilir.
+
+
+
+8. Kullanıcı sorumlulukları
+
+Hesaplarınızın, oturum dosyalarınızın, yedeklerinizin ve cihazınızın güvenliğinden siz sorumlusunuz. Yazılımı kullanmadan önce gerekli yedekleri almanız önerilir. Sağlayıcıların kullanım şartlarına ve yürürlükteki hukuka uymak sizin sorumluluğunuzdadır.
+
+
+
+9. Sorumluluğun sınırlandırılması
+
+Kanunun izin verdiği ölçüde hak sahibi; dolaylı zarar, kâr kaybı, iş kesintisi, veri kaybı veya üçüncü taraf taleplerinden doğan zararlardan sorumlu tutulamaz. Kanunen sınırlandırılamayan sorumluluklar, kasıt, ağır kusur ve emredici tüketici hükümleri saklıdır. “Hiçbir durumda hiçbir sorumluluk yoktur” şeklinde mutlak bir feragat ileri sürülmez.
+
+
+
+10. Destek ve güncelleme
+
+Sürekli teknik destek, belirli bir yanıt süresi veya otomatik güncelleme taahhüdü yoktur. Güncelleme yayımlanırsa koşullar ayrıca belirtilebilir.
+
+
+
+11. Bağımsızlık bildirimi
+
+Token Tracker; Cursor, OpenAI, ChatGPT, Codex, Anthropic, Claude, Google, Gemini, GitHub veya Copilot’un resmî ürünü değildir. Bu kuruluşlarla ortaklık, sponsorluk veya onay ilişkisi iddia edilmez. Anılan adlar yalnızca uyumluluk ve açıklama amacıyla kullanılabilir ve ilgili sahiplerinin markaları olabilir.
+
+
+
+12. Sona erme
+
+Bu lisansın esaslı ihlali hâlinde kullanım izniniz kendiliğinden sona erebilir. Sona ermede Yazılımı kullanmayı bırakmalı ve kopyalarını silmelisiniz. Kanunen saklı haklar etkilenmez.
+
+
+
+13. Uygulanacak hukuk ve yetki
+
+Bu sözleşme Türkiye Cumhuriyeti hukukuna tâbidir. Uyuşmazlıklarda [YETKİLİ MAHKEME VE İCRA DAİRELERİ] yetkilidir; emredici tüketici hükümleri saklıdır.
+
+
+
+14. İletişim
+
+Sorularınız için: keseryazilim@gmail.com
+

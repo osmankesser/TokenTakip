@@ -1,0 +1,17 @@
+Token Tracker 0.1.2 (Windows 64-bit)
+=====================================
+
+Yenilikler
+----------
+- Token Tracker adi ve tek dagitim (TokenTracker.exe)
+- Gercek ulke bayraklari (gomulu PNG)
+- Kota sayfasi: kritik kartlar ustte, detay sayfasi, esik ayarlari
+- Gizlilik: kota ve sohbet analizi icin acik onay
+
+Kurulum
+-------
+1. TokenTracker-0.1.2-win64.zip dosyasini acin
+2. Tum klasoru (TokenTracker.exe + _internal) ayni yere cikartin
+3. TokenTracker.exe calistirin
+
+Iletisim: keseryazilim@gmail.com
