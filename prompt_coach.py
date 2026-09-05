@@ -11,8 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
-HOME = Path.home()
-APPDATA = Path(os.environ.get("APPDATA", ""))
+from platform_util import home, roaming
 CODEX_DAYS = 14
 CODEX_TAIL_BYTES = 4_000_000  # ponytail: rollout logs grow unbounded; read tail only, upgrade path: session_index cursors
 CHAT_LIMIT = 40
@@ -77,12 +76,21 @@ class Finding:
 
 
 @dataclass
+class TokenTip:
+    code: str
+    helpers: list[str] = field(default_factory=list)
+    weight: int = 0
+    detail: str = ""
+
+
+@dataclass
 class CoachReport:
     chats: int
     chars: int
     tools: int
     burns: list[ChatBurn] = field(default_factory=list)
     findings: list[Finding] = field(default_factory=list)
+    tips: list[TokenTip] = field(default_factory=list)
     mcps: list[str] = field(default_factory=list)
     skills: list[str] = field(default_factory=list)
     error: str = ""
@@ -134,15 +142,104 @@ def build_report(*, allow_chat: bool = False) -> CoachReport:
     findings = _merge_findings(by_source, 12)
     for item in findings:
         item.count = counts[(item.source, item.code)]
+    tips = _build_token_tips(burns, findings, mcps, skills)
     return CoachReport(
         chats=len(chats),
         chars=sum(b.chars for b in burns),
         tools=sum(b.tools for b in burns),
         burns=burns[:8],
         findings=findings,
+        tips=tips,
         mcps=mcps,
         skills=skills[:16],
     )
+
+
+def _tool_counts(burns: list[ChatBurn]) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for burn in burns:
+        blob = (burn.top_tools or "").replace("—", "")
+        for part in blob.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            name = part.split("×")[0].split("x")[0].strip()
+            if not name:
+                continue
+            try:
+                n = int(part.rsplit("×", 1)[1]) if "×" in part else 1
+            except (ValueError, IndexError):
+                n = 1
+            counts[name] += max(1, n)
+    return counts
+
+
+def _build_token_tips(
+    burns: list[ChatBurn],
+    findings: list[Finding],
+    mcps: list[str],
+    skills: list[str],
+) -> list[TokenTip]:
+    tips: list[TokenTip] = []
+    codes = Counter({f.code: f.count for f in findings})
+    for f in findings:
+        codes[f.code] = max(codes[f.code], f.count)
+    helper_hits: Counter[str] = Counter()
+    for item in findings:
+        for name in item.helpers:
+            helper_hits[name] += max(1, item.count)
+    tools = _tool_counts(burns)
+    top_tools = [name for name, _ in tools.most_common(4)]
+
+    if codes.get("paste", 0) >= 1:
+        tips.append(TokenTip("tip_paste", weight=100 + codes["paste"] * 10))
+    if codes.get("vague", 0) >= 1:
+        tips.append(TokenTip("tip_vague", weight=80 + codes["vague"] * 8))
+    if codes.get("dup", 0) >= 1:
+        tips.append(TokenTip("tip_dup", weight=70 + codes["dup"] * 8))
+    if codes.get("split", 0) >= 1 or codes.get("rewrite", 0) >= 1:
+        tips.append(TokenTip("tip_focus", weight=65 + codes.get("split", 0) * 5 + codes.get("rewrite", 0) * 5))
+    if codes.get("rebuild", 0) >= 1:
+        tips.append(TokenTip("tip_rebuild", weight=60 + codes["rebuild"] * 5))
+    if any(t for t in top_tools if t.lower() in ("read_file", "read", "grep", "shell", "bash", "run_terminal_cmd")):
+        tips.append(TokenTip("tip_path", helpers=top_tools[:3], weight=55 + sum(tools[t] for t in top_tools[:3])))
+    if burns and max((b.chars for b in burns), default=0) > 80_000:
+        tips.append(TokenTip("tip_session", weight=50))
+
+    # Prefer MCP/skills that already match chat issues, else installed ones
+    ranked_helpers = [n for n, _ in helper_hits.most_common(6)]
+    for name in ranked_helpers:
+        if name in mcps:
+            tips.append(TokenTip("tip_mcp", helpers=[name], weight=90 + helper_hits[name] * 12, detail=name))
+        elif name in skills:
+            tips.append(TokenTip("tip_skill", helpers=[name], weight=85 + helper_hits[name] * 12, detail=name))
+    for name in mcps:
+        if name in helper_hits:
+            continue
+        tips.append(TokenTip("tip_mcp", helpers=[name], weight=40, detail=name))
+        if sum(1 for t in tips if t.code == "tip_mcp") >= 3:
+            break
+    for name in skills[:4]:
+        if name in helper_hits:
+            continue
+        tips.append(TokenTip("tip_skill", helpers=[name], weight=35, detail=name))
+        if sum(1 for t in tips if t.code == "tip_skill") >= 2:
+            break
+
+    tips.append(TokenTip("tip_baseline", weight=10))
+    tips.sort(key=lambda t: t.weight, reverse=True)
+    # dedupe by code+detail
+    seen: set[tuple[str, str]] = set()
+    out: list[TokenTip] = []
+    for tip in tips:
+        key = (tip.code, tip.detail)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(tip)
+        if len(out) >= 8:
+            break
+    return out
 
 
 def _issues(text: str, prev: str, have: set[str]) -> list[tuple[str, list[str]]]:
@@ -249,12 +346,12 @@ def _collect_files(root: Path, pattern: str, *, allow_large: bool = False) -> li
 
 
 def _cursor_chats(limit: int | None = None) -> list[tuple[ChatBurn, list[str]]]:
-    return _transcript_chats("Cursor", HOME / ".cursor" / "projects", "*/agent-transcripts/*/*.jsonl", limit=limit)
+    return _transcript_chats("Cursor", home(".cursor", "projects"), "*/agent-transcripts/*/*.jsonl", limit=limit)
 
 
 def _claude_chats(limit: int | None = None) -> list[tuple[ChatBurn, list[str]]]:
     return _transcript_chats(
-        "Claude", HOME / ".claude" / "projects", "*/*.jsonl", skip_subagents=False, limit=limit
+        "Claude", home(".claude", "projects"), "*/*.jsonl", skip_subagents=False, limit=limit
     )
 
 
@@ -342,7 +439,7 @@ def _parse_transcript(path: Path, label: str) -> tuple[ChatBurn, list[str]]:
 
 
 def _codex_chats(limit: int | None = None) -> list[tuple[ChatBurn, list[str]]]:
-    root = HOME / ".codex"
+    root = home(".codex")
     resolved = _resolve_root(root)
     if resolved is None:
         return []
@@ -377,7 +474,7 @@ def _codex_chats(limit: int | None = None) -> list[tuple[ChatBurn, list[str]]]:
 
 def _codex_session_titles() -> dict[str, str]:
     names: dict[str, str] = {}
-    for obj in _jsonl(HOME / ".codex" / "session_index.jsonl"):
+    for obj in _jsonl(home(".codex", "session_index.jsonl")):
         sid = str(obj.get("id") or "")
         if sid:
             names[sid] = str(obj.get("thread_name") or sid[:8])
@@ -396,12 +493,12 @@ def _codex_title(path: Path, titles: dict[str, str]) -> str:
 
 
 def _copilot_chats(limit: int | None = None) -> list[tuple[ChatBurn, list[str]]]:
-    if not APPDATA.is_dir():
+    if not roaming().is_dir():
         return []
     out: list[tuple[ChatBurn, list[str]]] = []
     seen: set[Path] = set()
     for ide in ("Code", "Cursor", "Windsurf", "Trae", "VSCodium"):
-        base = APPDATA / ide / "User" / "workspaceStorage"
+        base = roaming(ide, "User", "workspaceStorage")
         resolved = _resolve_root(base)
         if resolved is None:
             continue
@@ -430,7 +527,7 @@ def _copilot_chats(limit: int | None = None) -> list[tuple[ChatBurn, list[str]]]
 
 
 def _gemini_chats(limit: int | None = None) -> list[tuple[ChatBurn, list[str]]]:
-    root = HOME / ".gemini" / "tmp"
+    root = home(".gemini", "tmp")
     out: list[tuple[ChatBurn, list[str]]] = []
     files: list[Path] = []
     seen: set[Path] = set()
@@ -567,7 +664,7 @@ def _parse_copilot_session(path: Path, label: str) -> tuple[ChatBurn, list[str]]
 
 
 def _continue_chats(limit: int | None = None) -> list[tuple[ChatBurn, list[str]]]:
-    root = HOME / ".continue" / "sessions"
+    root = home(".continue", "sessions")
     out = []
     for path in _collect_files(root, "*.json"):
         if limit is not None and len(out) >= limit:
@@ -725,7 +822,7 @@ def _clip(text: str, n: int = 140) -> str:
 
 def _mcp_names() -> list[str]:
     names: set[str] = set()
-    for path in (HOME / ".cursor" / "mcp.json", APPDATA / "Code" / "User" / "mcp.json"):
+    for path in (home(".cursor", "mcp.json"), roaming("Code", "User", "mcp.json")):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -737,7 +834,7 @@ def _mcp_names() -> list[str]:
 
 def _skill_names() -> list[str]:
     names: list[str] = []
-    for root in (HOME / ".cursor" / "skills", HOME / ".cursor" / "skills-cursor", HOME / ".codex" / "skills"):
+    for root in (home(".cursor", "skills"), home(".cursor", "skills-cursor"), home(".codex", "skills")):
         if not root.is_dir():
             continue
         for skill in root.glob("*/SKILL.md"):

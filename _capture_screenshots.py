@@ -9,7 +9,7 @@ from PySide6.QtCore import QSettings, QTimer
 from PySide6.QtWidgets import QApplication
 
 from overlay import UsageOverlay
-from prompt_coach import ChatBurn, CoachReport, Finding
+from prompt_coach import ChatBurn, CoachReport, Finding, TokenTip
 from usage_client import Meter, ProviderUsage, UsageSnapshot
 
 ROOT = Path(__file__).resolve().parent
@@ -66,6 +66,11 @@ def _coach() -> CoachReport:
             Finding("paste", "Cursor", "tum dosyayi yapistirdim...", [], "overlay.py", "bugun", 3),
             Finding("vague", "Codex", "duzelt sunu", [], "", "dun", 2),
         ],
+        tips=[
+            TokenTip("tip_paste", weight=100),
+            TokenTip("tip_mcp", helpers=["github"], weight=90, detail="github"),
+            TokenTip("tip_baseline", weight=10),
+        ],
         mcps=["github", "browser"],
         skills=["ponytail"],
     )
@@ -101,6 +106,8 @@ def main() -> int:
 
     win.goto("usage")
     win._apply(_snap())
+    win._set_live_state("live")
+    win.set_pct_decimals(4)
     _grab(win, "01-usage.png")
     _grab(win, "usage-tr.png")
 
@@ -116,17 +123,27 @@ def main() -> int:
     win._lang = "en"
     win._apply_language()
     win.goto("settings")
+    win.set_pct_decimals(4)
+    QApplication.processEvents()
+    win._settings_scroll.ensureWidgetVisible(win.pct_dec_label)
+    QApplication.processEvents()
     _grab(win, "02-settings.png")
     _grab(win, "settings-en.png")
 
     win._lang = "tr"
     win._apply_language()
+    win._settings_scroll.ensureWidgetVisible(win.pct_dec_label)
+    QApplication.processEvents()
     _grab(win, "settings-tr.png")
 
     win.goto("ideas")
     win._coach = _coach()
     win._fill_ideas()
     _grab(win, "03-ideas.png")
+
+    win.goto("tips")
+    win._fill_tips()
+    _grab(win, "04-tips.png")
 
     win.close()
     return 0

@@ -83,13 +83,15 @@ class LicenseGateTests(unittest.TestCase):
 
     def test_accept_grants_license_and_features(self) -> None:
         path = self._lic()
-        win = UsageOverlay(
-            auto_fetch=False,
-            for_test=True,
-            license_path=path,
-            license_prompt=lambda _t: True,
-        )
-        self.addCleanup(win.close)
+        with mock.patch("overlay._set_startup") as boot:
+            win = UsageOverlay(
+                auto_fetch=False,
+                for_test=True,
+                license_path=path,
+                license_prompt=lambda _t: True,
+            )
+            self.addCleanup(win.close)
+            boot.assert_called_once_with(True)
         self.assertEqual(self._settings.value("license_accepted_ver"), LICENSE_DOC_VER)
         self.assertTrue(self._settings.value("license_accepted", False, type=bool))
         self.assertTrue(self._settings.value("quota_access", False, type=bool))

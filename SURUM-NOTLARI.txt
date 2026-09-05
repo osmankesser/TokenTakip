@@ -1,16 +1,17 @@
-Token Tracker 0.1.3 (Windows 64-bit)
+Token Tracker 0.1.4 (Windows 64-bit)
 =====================================
 
 Yenilikler
 ----------
-- Tek acilis onayi: lisans + kota erisimi + sohbet analizi birlikte
-- Varsayilan dil Ingilizce
-- Gercek ulke bayraklari (gomulu PNG)
-- Kota sayfasi: kritik kartlar ustte, detay sayfasi, esik ayarlari
+- Canli yenileme (5 sn) + surum yaninda durum noktasi
+- Token dusurme ipuclari ayri sayfada
+- Kartlari surukle-birak sirala; sag tik ile gizle
+- Yuzde ondalik basamak secimi (X.YYYY, max 20 karakter)
+- Dususu gosterim: (-n) ve tray en dusuk kalan
 
 Kurulum
 -------
-1. TokenTracker-0.1.3-win64.zip dosyasini acin
+1. TokenTracker-0.1.4-win64.zip dosyasini acin
 2. Tum klasoru (TokenTracker.exe + _internal) ayni yere cikartin
 3. TokenTracker.exe calistirin
 

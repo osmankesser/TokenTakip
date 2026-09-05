@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import shutil
 import sys
-import winreg
 from collections import Counter, deque
 from collections.abc import Callable
 from datetime import datetime
@@ -13,6 +12,16 @@ from pathlib import Path
 from typing import Literal
 
 from math import cos, pi, sin
+
+from platform_util import (
+    STARTUP_ARG,
+    app_cache_dir,
+    platform_ok,
+    set_startup as _set_startup,
+    show_platform_error,
+    startup_on as _startup_on,
+    startup_registered as _startup_registered,
+)
 
 from PySide6.QtCore import (
     QEvent,
@@ -32,6 +41,7 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -53,6 +63,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFrame,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QMenu,
@@ -232,7 +243,7 @@ def read_license_text(path: Path | str) -> tuple[str | None, Literal["", "missin
 APP_NAME = "Token Tracker"
 APP_ID = "TokenTracker"
 SETTINGS_ORG = "TokenTracker"
-RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_INSTANCE_SOCK = "TokenTracker.single"
 RUN_NAME = "TokenTracker"
 _RUN_LEGACY = "PulseTokenTakip"
 ROUND = 18
@@ -271,6 +282,7 @@ _IDEA_GLYPH_PX = 26
 _FLUENT = {
     "kota": 0xE9D2,
     "ideas": 0xEA80,
+    "tips": 0xE74B,
     "chat": 0xE8BD,
     "settings": 0xE713,
     "close": 0xE711,
@@ -285,6 +297,9 @@ _FLUENT = {
     "danger": 0xE783,
 }
 _CHIP_GLYPH_PX = 18
+_LIVE_GLYPH_PX = 14
+_LIVE_OK = QColor("#22c55e")
+_LIVE_ERR = QColor("#ef4444")
 
 
 def _asset_path(name: str) -> Path:
@@ -378,8 +393,7 @@ def _username() -> str:
 
 
 def _cache_root() -> Path:
-    root = Path(os.environ.get("LOCALAPPDATA", str(ROOT))) / "TokenTracker" / "cache"
-    root.mkdir(parents=True, exist_ok=True)
+    root = app_cache_dir()
     bad = root / "icons" / "copilot.png"
     if bad.is_file():
         bad.unlink(missing_ok=True)
@@ -571,6 +585,38 @@ def _glyph(kind: str, color: QColor, size: int = 22, phase: float = 0.0, press: 
         p.drawPath(path)
         p.drawLine(int(r.center().x()), int(r.top() + r.height() * 0.38), int(r.center().x()), int(r.bottom() - 6))
         p.drawPoint(int(r.center().x()), int(r.bottom() - 3))
+    elif kind == "tips":
+        c = r.center()
+        p.drawLine(QPointF(c.x(), r.top() + 2), QPointF(c.x(), r.bottom() - 6))
+        p.drawLine(QPointF(c.x(), r.bottom() - 6), QPointF(c.x() - 5, r.bottom() - 12))
+        p.drawLine(QPointF(c.x(), r.bottom() - 6), QPointF(c.x() + 5, r.bottom() - 12))
+        p.drawLine(QPointF(r.left() + 3, r.bottom() - 2), QPointF(r.right() - 3, r.bottom() - 2))
+    elif kind == "live_ok":
+        c = r.center()
+        rad = r.width() * 0.28
+        glow = QColor(color)
+        glow.setAlpha(70)
+        p.setPen(Qt.NoPen)
+        p.setBrush(glow)
+        p.drawEllipse(c, rad * 1.55, rad * 1.55)
+        p.setBrush(color)
+        p.drawEllipse(c, rad, rad)
+    elif kind == "live_err":
+        # inverted triangle (point down) + bang
+        path = QPainterPath()
+        path.moveTo(r.left() + 2, r.top() + 3)
+        path.lineTo(r.right() - 2, r.top() + 3)
+        path.lineTo(r.center().x(), r.bottom() - 2)
+        path.closeSubpath()
+        p.setPen(Qt.NoPen)
+        p.setBrush(color)
+        p.drawPath(path)
+        p.setPen(QPen(QColor("#ffffff"), max(1.6, size * 0.09), Qt.SolidLine, Qt.RoundCap))
+        cx = r.center().x()
+        p.drawLine(QPointF(cx, r.top() + r.height() * 0.28), QPointF(cx, r.top() + r.height() * 0.58))
+        p.setBrush(QColor("#ffffff"))
+        p.setPen(Qt.NoPen)
+        p.drawEllipse(QPointF(cx, r.top() + r.height() * 0.70), size * 0.05, size * 0.05)
     elif kind == "chat":
         p.drawRoundedRect(r.adjusted(0, 0, 0, -4), 4, 4)
         p.drawLine(int(r.left() + 4), int(r.bottom() - 4), int(r.left() + 8), int(r.bottom()))
@@ -780,13 +826,30 @@ class HeaderIconBtn(QPushButton):
         p.end()
 
 
+INTERVALS = (5, 30, 60, 300)
+PCT_DECIMALS = (0, 2, 4, 6, 8, 12)
+PCT_TEXT_MAX = 20
+
+
+def _pct_drop(store: dict[str, float], key: str, pct: float | None) -> float | None:
+    prev = store.get(key)
+    if pct is not None:
+        store[key] = pct
+    if prev is None or pct is None:
+        return None
+    drop = prev - pct
+    return drop if drop > 0.00005 else None
+
+
 def _display_name(name: str) -> str:
     m = {"CHATGPT": "ChatGPT", "CODEX": "Codex", "CURSOR": "Cursor", "OLLAMA": "Ollama", "LM STUDIO": "LM Studio"}
     return m.get(name.upper(), name.title())
 
 
 def _idea_kind(code: str) -> str:
-    if code in ("paste", "rebuild"):
+    if code in ("paste", "rebuild") or code.startswith("tip_"):
+        if code.startswith("tip_"):
+            return "info"
         return "danger"
     if code == "helper":
         return "info"
@@ -919,6 +982,10 @@ QFrame#card[critical="true"] {{
     background: {p["card_crit_bg"]}; border: 1px solid {p["card_crit_border"]};
     border-left: 3px solid {p["bar_crit"]};
 }}
+QFrame#card[dragging="true"] {{
+    background: {p["segment"]}; border: 2px dashed {a};
+    min-height: 72px;
+}}
 QFrame#cardSkeleton {{
     background: {p["segment"]}; border: 1px solid {p["card_border"]}; border-radius: 14px; min-height: 88px;
 }}
@@ -977,7 +1044,6 @@ QFrame#ideaCard[kind="info"] QLabel#ideaDate,
 QFrame#ideaCard[kind="danger"] QLabel#ideaDate {{
     color: {p["muted"]};
 }}
-QLabel#loadingLabel {{ color: {p["muted"]}; font-size: 11px; }}
 QPushButton#roundBtn {{ background: transparent; border: none; }}
 """
 
@@ -1069,7 +1135,6 @@ QScrollArea#list QWidget#listInner { background: transparent; }
 QCheckBox#switch::indicator {
     width: 46px; height: 26px; border-radius: 13px; background: #cbd5e1;
 }
-QLabel#loadingLabel { color: #64748b; font-size: 11px; font-weight: 600; padding: 8px; }
 QCheckBox#switch::indicator:checked { background: #2563eb; }
 """
 
@@ -1184,14 +1249,43 @@ class Bar(QWidget):
         painter.fillPath(fill, color)
 
 
-class _CardClickFilter(QObject):
+class _CardInteractFilter(QObject):
     def __init__(self, overlay: "UsageOverlay", name: str):
         super().__init__(overlay)
         self._overlay = overlay
         self._name = name
+        self._press: QPoint | None = None
+        self._dragging = False
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
-        if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+        et = event.type()
+        if et == QEvent.MouseButtonPress:
+            if event.button() == Qt.RightButton:
+                gp = event.globalPosition().toPoint() if hasattr(event, "globalPosition") else event.globalPos()
+                self._overlay._provider_context_menu(self._name, gp)
+                return True
+            if event.button() == Qt.LeftButton:
+                self._press = event.position().toPoint() if hasattr(event, "position") else event.pos()
+                self._dragging = False
+            return False
+        if et == QEvent.MouseMove and self._press is not None and event.buttons() & Qt.LeftButton:
+            pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+            gp = event.globalPosition().toPoint() if hasattr(event, "globalPosition") else event.globalPos()
+            if not self._dragging and (pos - self._press).manhattanLength() >= 10:
+                self._dragging = True
+                self._overlay._start_card_drag(self._name, obj, self._press)
+            if self._dragging:
+                self._overlay._move_card_drag(gp)
+            return False
+        if et == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+            dragged = self._dragging
+            self._press = None
+            self._dragging = False
+            gp = event.globalPosition().toPoint() if hasattr(event, "globalPosition") else event.globalPos()
+            if dragged:
+                self._overlay._end_card_drag()
+                self._overlay._drop_provider_at(self._name, gp)
+                return True
             pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
             child = obj.childAt(pos)
             while child is not None and child is not obj:
@@ -1199,6 +1293,7 @@ class _CardClickFilter(QObject):
                     return False
                 child = child.parentWidget()
             self._overlay._open_usage_detail(self._name)
+            return False
         return False
 
 
@@ -1225,10 +1320,21 @@ class MeterRow(QWidget):
         if not compact:
             layout.addWidget(self.meta)
 
-    def set_meter(self, meter: Meter, translate, left_fmt: str, detail: str = "") -> None:
+    def set_meter(
+        self,
+        meter: Meter,
+        translate,
+        left_fmt: str,
+        detail: str = "",
+        *,
+        pct_fmt=None,
+    ) -> None:
         self.name.setText(translate(meter.label))
         if meter.remaining_percent is not None:
-            self.value.setText(left_fmt.format(n=meter.remaining_percent))
+            if callable(pct_fmt):
+                self.value.setText(pct_fmt(meter.remaining_percent))
+            else:
+                self.value.setText(left_fmt.format(n=meter.remaining_percent))
         else:
             self.value.setText(translate(meter.remaining_text) or "—")
         self.bar.set_remaining(meter.remaining_percent)
@@ -1259,6 +1365,7 @@ class NavTab(QWidget):
         self.text = QLabel()
         self.text.setObjectName("navText")
         self.text.setAlignment(Qt.AlignCenter)
+        self.text.setWordWrap(True)
         lay.addWidget(self.icon, 0, Qt.AlignHCenter)
         lay.addWidget(self.text)
         self._active = None
@@ -1357,6 +1464,7 @@ class UsageOverlay(QWidget):
             self._chat_analysis = False
             self._consent_seen = True
             self._warn_pct, self._crit_pct = 40, 15
+            self._pct_decimals = 4
         else:
             self._lang = str(self._settings.value("lang", "en"))
             if self._lang not in LANG_CODES:
@@ -1368,7 +1476,7 @@ class UsageOverlay(QWidget):
                 self._interval = int(self._settings.value("interval", 60))
             except (TypeError, ValueError):
                 self._interval = 60
-            if self._interval not in (30, 60, 300):
+            if self._interval not in INTERVALS:
                 self._interval = 60
             self._quota_access = self._settings.value("quota_access", False, type=bool)
             self._chat_analysis = self._settings.value("chat_analysis", False, type=bool)
@@ -1385,7 +1493,23 @@ class UsageOverlay(QWidget):
                 self._warn_pct = 40
             if self._crit_pct not in (10, 15, 20):
                 self._crit_pct = 15
+            try:
+                self._pct_decimals = int(self._settings.value("pct_decimals", 4))
+            except (TypeError, ValueError):
+                self._pct_decimals = 4
+            if self._pct_decimals not in PCT_DECIMALS:
+                self._pct_decimals = 4
         self._snap: UsageSnapshot | None = None
+        self._last_pcts: dict[str, float] = {}
+        self._recent_drops: dict[str, float] = {}
+        self._live_state = "idle"  # idle | live | busy | err
+        self._live_blink_on = True
+        self._drag_ghost: QLabel | None = None
+        self._drag_source: QWidget | None = None
+        self._drag_hotspot = QPoint()
+        self._drag_name = ""
+        self._drag_slot = -1
+        self._drag_hidden_children: list[QWidget] = []
         self._coach: CoachReport | None = None
         self._coach_worker = None
         self._page = "usage"
@@ -1423,10 +1547,23 @@ class UsageOverlay(QWidget):
         titles.setSpacing(0)
         self.title = QLabel()
         self.title.setObjectName("welcomeTitle")
+        ver_row = QHBoxLayout()
+        ver_row.setContentsMargins(0, 0, 0, 0)
+        ver_row.setSpacing(6)
+        self.live_icon = QLabel()
+        self.live_icon.setObjectName("liveIcon")
+        self.live_icon.setFixedSize(_LIVE_GLYPH_PX + 2, _LIVE_GLYPH_PX + 2)
+        self.live_icon.setAlignment(Qt.AlignCenter)
+        self._live_opacity = QGraphicsOpacityEffect(self.live_icon)
+        self._live_opacity.setOpacity(1.0)
+        self.live_icon.setGraphicsEffect(self._live_opacity)
         self.subtitle = QLabel()
         self.subtitle.setObjectName("versionLabel")
+        ver_row.addWidget(self.live_icon, 0, Qt.AlignVCenter)
+        ver_row.addWidget(self.subtitle, 0, Qt.AlignVCenter)
+        ver_row.addStretch(1)
         titles.addWidget(self.title)
-        titles.addWidget(self.subtitle)
+        titles.addLayout(ver_row)
         cap.addLayout(titles, 1)
         self.stamp = QLabel()
         self.stamp.setObjectName("stamp")
@@ -1474,11 +1611,6 @@ class UsageOverlay(QWidget):
         self.usage_hidden_row.linkActivated.connect(self._unhide_provider)
         self.usage_hidden_row.hide()
         usage_l.addWidget(self.usage_hidden_row)
-        self.loading_label = QLabel()
-        self.loading_label.setObjectName("loadingLabel")
-        self.loading_label.setAlignment(Qt.AlignCenter)
-        self.loading_label.hide()
-        usage_l.addWidget(self.loading_label)
         self.scroll = QScrollArea()
         self.scroll.setObjectName("list")
         self.scroll.setWidgetResizable(True)
@@ -1542,6 +1674,24 @@ class UsageOverlay(QWidget):
         ideas_l.addWidget(ideas_scroll, 1)
         self.pages.addWidget(ideas_page)
 
+        tips_page = QWidget()
+        tips_l = QVBoxLayout(tips_page)
+        tips_l.setContentsMargins(0, 0, 0, 0)
+        tips_l.setSpacing(8)
+        tips_scroll = QScrollArea()
+        tips_scroll.setObjectName("list")
+        self._tips_scroll = tips_scroll
+        tips_scroll.setWidgetResizable(True)
+        tips_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.tips_inner = QWidget()
+        self.tips_inner.setObjectName("listInner")
+        self.tips_layout = QVBoxLayout(self.tips_inner)
+        self.tips_layout.setContentsMargins(0, 0, 0, 0)
+        self.tips_layout.setSpacing(8)
+        tips_scroll.setWidget(self.tips_inner)
+        tips_l.addWidget(tips_scroll, 1)
+        self.pages.addWidget(tips_page)
+
         detail_page = QWidget()
         detail_l = QVBoxLayout(detail_page)
         detail_l.setContentsMargins(0, 0, 0, 0)
@@ -1550,7 +1700,7 @@ class UsageOverlay(QWidget):
         self.detail_back = QPushButton(self.t("ideas_detail_back"))
         self.detail_back.setObjectName("lookBtn")
         self.detail_back.setCursor(Qt.PointingHandCursor)
-        self.detail_back.clicked.connect(lambda: self.goto("ideas"))
+        self.detail_back.clicked.connect(self._idea_detail_back)
         detail_head.addWidget(self.detail_back)
         detail_head.addStretch(1)
         detail_l.addLayout(detail_head)
@@ -1650,6 +1800,14 @@ class UsageOverlay(QWidget):
         self.ud_reset = QLabel()
         self.ud_reset.setObjectName("meterMeta")
         ud_l.addWidget(self.ud_reset)
+        self.ud_model = QLabel()
+        self.ud_model.setObjectName("meterMeta")
+        self.ud_model.hide()
+        ud_l.addWidget(self.ud_model)
+        self.ud_usage = QLabel()
+        self.ud_usage.setObjectName("meterMeta")
+        self.ud_usage.hide()
+        ud_l.addWidget(self.ud_usage)
         self.ud_error = QLabel()
         self.ud_error.setObjectName("error")
         self.ud_error.setWordWrap(True)
@@ -1722,8 +1880,8 @@ class UsageOverlay(QWidget):
         int_row.setContentsMargins(3, 3, 3, 3)
         int_row.setSpacing(2)
         self.interval_btns = []
-        for sec, label in ((30, "30 sn"), (60, "1 dk"), (300, "5 dk")):
-            btn = QPushButton(label)
+        for sec in INTERVALS:
+            btn = QPushButton()
             btn.setObjectName("segBtn")
             btn.setCursor(Qt.PointingHandCursor)
             btn.clicked.connect(lambda _, s=sec: self.set_interval(s))
@@ -1761,6 +1919,22 @@ class UsageOverlay(QWidget):
             btn.clicked.connect(lambda _, n=pct: self.set_crit_pct(n))
             self.crit_btns.append((pct, btn))
             crit_row.addWidget(btn, 1)
+        self.pct_dec_label = QLabel()
+        self.pct_dec_label.setObjectName("section")
+        pct_dec_seg = QFrame()
+        pct_dec_seg.setObjectName("segment")
+        self._pct_dec_seg = pct_dec_seg
+        pct_dec_row = QHBoxLayout(pct_dec_seg)
+        pct_dec_row.setContentsMargins(3, 3, 3, 3)
+        pct_dec_row.setSpacing(2)
+        self.pct_dec_btns: list[tuple[int, QPushButton]] = []
+        for n in PCT_DECIMALS:
+            btn = QPushButton(str(n))
+            btn.setObjectName("segBtn")
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(lambda _, d=n: self.set_pct_decimals(d))
+            self.pct_dec_btns.append((n, btn))
+            pct_dec_row.addWidget(btn, 1)
         self.pin_btn = QCheckBox()
         self.pin_btn.setObjectName("switch")
         self.pin_btn.setAccessibleName("pinBtn")
@@ -1850,6 +2024,8 @@ class UsageOverlay(QWidget):
         set_l.addWidget(warn_seg)
         set_l.addWidget(self.crit_label)
         set_l.addWidget(crit_seg)
+        set_l.addWidget(self.pct_dec_label)
+        set_l.addWidget(pct_dec_seg)
         set_l.addWidget(pin_frame)
         set_l.addWidget(boot_frame)
         set_l.addWidget(quota_frame)
@@ -1871,8 +2047,9 @@ class UsageOverlay(QWidget):
         nav.setSpacing(4)
         self.home_btn = self._nav("kota", "usage")
         self.ideas_btn = self._nav("ideas", "ideas")
+        self.tips_btn = self._nav("tips", "tips")
         self.settings_btn = self._nav("settings", "settings")
-        for b in (self.home_btn, self.ideas_btn, self.settings_btn):
+        for b in (self.home_btn, self.ideas_btn, self.tips_btn, self.settings_btn):
             nav.addWidget(b, 1)
         root.addWidget(nav_bar)
         self.provider_cards = []
@@ -1896,21 +2073,30 @@ class UsageOverlay(QWidget):
         self.tray.show()
 
         self.timer = QTimer(self)
-        self.timer.setInterval(self._interval * 1000)
+        self._apply_poll_interval()
         self.timer.timeout.connect(self.refresh)
         self.clock = QTimer(self)
         self.clock.setInterval(5000)
         self.clock.timeout.connect(self._tick)
+        self._live_pulse = QTimer(self)
+        self._live_pulse.setInterval(480)
+        self._live_pulse.timeout.connect(self._pulse_live_icon)
         self.setStyleSheet(STYLE)
         self.panel.setStyleSheet(_theme_css(self._theme))
         self._sync_theme_surfaces()
         self._apply_language()
         self._tick()
+        self._sync_live_icon(force=True)
         self._license_granted = self._gate_license()
         if not self._license_granted:
             self._quitting = True
             self._place()
             return
+        if not for_test and not _startup_registered():
+            _set_startup(True)
+            self.boot_btn.blockSignals(True)
+            self.boot_btn.setChecked(True)
+            self.boot_btn.blockSignals(False)
         if not for_test:
             self.clock.start()
         if auto_fetch and self._quota_access:
@@ -1925,6 +2111,25 @@ class UsageOverlay(QWidget):
         pack = TEXTS.get(self._lang) or TEXTS["en"]
         return pack.get(key, TEXTS["en"].get(key, key))
 
+    def _pct_num(self, n: float) -> str:
+        """Format percent digits; keep full left_short text within PCT_TEXT_MAX chars."""
+        d = max(0, min(int(self._pct_decimals), max(PCT_DECIMALS)))
+        while d >= 0:
+            num = f"{n:.{d}f}"
+            if len(self.t("left_short").format(n=num)) <= PCT_TEXT_MAX:
+                return num
+            d -= 1
+        return f"{n:.0f}"
+
+    def _pct_left(self, n: float) -> str:
+        return self.t("left").format(n=self._pct_num(n))
+
+    def _pct_left_short(self, n: float) -> str:
+        return self.t("left_short").format(n=self._pct_num(n))
+
+    def _pct_drop_text(self, n: float) -> str:
+        return self.t("usage_drop").format(n=self._pct_num(n))
+
     def tx(self, text: str) -> str:
         if not text or text == "—":
             return text
@@ -1932,7 +2137,15 @@ class UsageOverlay(QWidget):
             key, *args = text.split("|")
             tmpl = self.t(key)
             if key == "left":
-                return tmpl.format(n=float(args[0]))
+                return self._pct_left(float(args[0]))
+            if key == "tokens_used":
+                return tmpl.format(used=args[0])
+            if key == "tokens_used_turn":
+                return tmpl.format(used=args[0], last=args[1])
+            if key == "spend_used":
+                return tmpl.format(used=args[0], limit=args[1])
+            if key == "spend_only":
+                return tmpl.format(used=args[0])
             if key == "fmt.money_left":
                 return tmpl.format(amount=args[0])
             if key == "fmt.limit":
@@ -2070,6 +2283,8 @@ class UsageOverlay(QWidget):
             self._style_seg_btn(btn, pct == self._warn_pct)
         for pct, btn in self.crit_btns:
             self._style_seg_btn(btn, pct == self._crit_pct)
+        for n, btn in self.pct_dec_btns:
+            self._style_seg_btn(btn, n == self._pct_decimals)
         for name, btn in (
             ("all", self.filter_all),
             ("warn", self.filter_warn),
@@ -2108,6 +2323,7 @@ class UsageOverlay(QWidget):
         self._sync_header_colors()
         self.home_btn.set_text(self.t("usage"))
         self.ideas_btn.set_text(self.t("ideas"))
+        self.tips_btn.set_text(self.t("tips_nav"))
         self.settings_btn.set_text(self.t("settings"))
         self.settings_title.setText(self.t("settings"))
         self.lang_label.setText(self.t("lang_label"))
@@ -2115,6 +2331,7 @@ class UsageOverlay(QWidget):
         self.interval_label.setText(self.t("interval_label"))
         self.warn_label.setText(self.t("warn_label"))
         self.crit_label.setText(self.t("crit_label"))
+        self.pct_dec_label.setText(self.t("pct_decimals_label"))
         self.pin_label.setText(self.t("pin_label"))
         self.pin_hint.setText(self.t("pin_hint"))
         self.boot_label.setText(self.t("boot_label"))
@@ -2124,15 +2341,9 @@ class UsageOverlay(QWidget):
         self.chat_label.setText(self.t("chat_label"))
         self.chat_hint.setText(self.t("chat_hint"))
         self.version_label.setText(self.t("version_long").format(v=VERSION))
-        self.loading_label.setText(self.t("loading"))
         self.usage_order_hint.setText(self.t("usage_order_hint"))
         self.ud_back.setText(self.t("ideas_detail_back"))
         self.ud_hide.setText(self.t("usage_hide"))
-        for card in getattr(self, "provider_cards", ()):
-            btns = getattr(card["frame"], "_order_btns", ())
-            if len(btns) == 2:
-                btns[0].setToolTip(self.t("usage_order_up"))
-                btns[1].setToolTip(self.t("usage_order_down"))
         self._refresh_hidden_row()
         if self._page == "usage_detail":
             self._populate_usage_detail()
@@ -2154,24 +2365,22 @@ class UsageOverlay(QWidget):
         pairs = (
             (self.home_btn, "usage"),
             (self.ideas_btn, "ideas"),
+            (self.tips_btn, "tips"),
             (self.settings_btn, "settings"),
         )
         for btn, page in pairs:
-            btn.set_active(
-                self._page == page
-                or (page == "ideas" and self._page == "idea_detail")
-                or (page == "usage" and self._page == "usage_detail"),
-                force=True,
-            )
+            btn.set_active(self._nav_active(page), force=True)
         for name, btn in self.theme_btns:
             btn.setText(self.t(f"theme_{name}"))
-        interval_keys = {30: "interval_30", 60: "interval_60", 300: "interval_300"}
+        interval_keys = {5: "interval_5", 30: "interval_30", 60: "interval_60", 300: "interval_300"}
         for sec, btn in self.interval_btns:
             btn.setText(self.t(interval_keys[sec]))
         for pct, btn in self.warn_btns:
             btn.setText(f"%{pct}")
         for pct, btn in self.crit_btns:
             btn.setText(f"%{pct}")
+        for n, btn in self.pct_dec_btns:
+            btn.setText(str(n))
         self._refresh_segment_states()
         self._refresh_theme_icons()
         if hasattr(self, "detail_back"):
@@ -2185,8 +2394,23 @@ class UsageOverlay(QWidget):
             self.detail_copy.setText(self.t("ideas_detail_copy"))
         if self._page == "idea_detail":
             self._populate_idea_detail()
-        if self._page == "ideas" and self._coach is not None:
+        if self._page in ("ideas", "tips") and self._coach is not None:
             self._fill_ideas()
+            self._fill_tips()
+
+    def _nav_active(self, page: str) -> bool:
+        if self._page == page:
+            return True
+        if page == "usage" and self._page == "usage_detail":
+            return True
+        if self._page != "idea_detail":
+            return False
+        tip = str(getattr(self, "_detail_code", "")).startswith("tip_")
+        if page == "tips":
+            return tip
+        if page == "ideas":
+            return not tip
+        return False
 
     def _sync_nav(self, *, force: bool = False) -> None:
         if force:
@@ -2194,14 +2418,10 @@ class UsageOverlay(QWidget):
         for btn, page in (
             (self.home_btn, "usage"),
             (self.ideas_btn, "ideas"),
+            (self.tips_btn, "tips"),
             (self.settings_btn, "settings"),
         ):
-            btn.set_active(
-                self._page == page
-                or (page == "ideas" and self._page == "idea_detail")
-                or (page == "usage" and self._page == "usage_detail"),
-                force=force,
-            )
+            btn.set_active(self._nav_active(page), force=force)
 
     def _set_filter(self, name: str) -> None:
         self._idea_filter = name
@@ -2273,26 +2493,16 @@ class UsageOverlay(QWidget):
         reset = QLabel()
         reset.setObjectName("meterMeta")
         mid.addWidget(reset)
-        order_col = QVBoxLayout()
-        order_col.setContentsMargins(0, 0, 0, 0)
-        order_col.setSpacing(0)
-        up = QPushButton("↑")
-        down = QPushButton("↓")
-        for btn in (up, down):
-            btn.setObjectName("orderBtn")
-            btn.setFixedSize(26, 22)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setFocusPolicy(Qt.NoFocus)
-        up.setToolTip(self.t("usage_order_up"))
-        down.setToolTip(self.t("usage_order_down"))
-        up.clicked.connect(lambda _, n=provider.name: self._move_provider(n, -1))
-        down.clicked.connect(lambda _, n=provider.name: self._move_provider(n, 1))
-        order_col.addWidget(up)
-        order_col.addWidget(down)
-        frame._order_btns = (up, down)
+        model = QLabel()
+        model.setObjectName("meterMeta")
+        model.hide()
+        mid.addWidget(model)
+        usage = QLabel()
+        usage.setObjectName("meterMeta")
+        usage.hide()
+        mid.addWidget(usage)
         top.addWidget(mark_wrap)
         top.addLayout(mid, 1)
-        top.addLayout(order_col, 0)
         layout.addLayout(top)
         body = QVBoxLayout()
         body.setSpacing(6)
@@ -2302,7 +2512,7 @@ class UsageOverlay(QWidget):
         error.setWordWrap(True)
         error.hide()
         layout.addWidget(error)
-        frame.installEventFilter(_CardClickFilter(self, provider.name))
+        frame.installEventFilter(_CardInteractFilter(self, provider.name))
         self._want_favicon(provider.name, mark)
         return {
             "name": provider.name,
@@ -2310,6 +2520,8 @@ class UsageOverlay(QWidget):
             "plan": plan,
             "pct": pct,
             "reset": reset,
+            "model": model,
+            "usage": usage,
             "body": body,
             "error": error,
             "mark": mark,
@@ -2348,7 +2560,6 @@ class UsageOverlay(QWidget):
     def _move_provider(self, name: str, delta: int) -> None:
         if not self._snap:
             return
-        by_name = {p.name: p for p in self._snap.providers}
         names = [c["name"] for c in self.provider_cards]
         try:
             idx = names.index(name)
@@ -2357,12 +2568,158 @@ class UsageOverlay(QWidget):
         j = idx + delta
         if j < 0 or j >= len(names):
             return
-        a, b = by_name.get(names[idx]), by_name.get(names[j])
+        self._reorder_provider(name, names[j])
+
+    def _drop_provider_at(self, name: str, global_pos: QPoint) -> None:
+        # Live layout already moved the slot; just persist current visual order.
+        if not self._snap:
+            return
+        names = [c["name"] for c in self.provider_cards]
+        if name not in names:
+            return
+        self._save_provider_order(names + self._load_hidden())
+
+    def _start_card_drag(self, name: str, frame: QWidget, hot_spot: QPoint) -> None:
+        self._end_card_drag()
+        pix = frame.grab()
+        if pix.isNull():
+            return
+        ghost = QLabel(None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        ghost.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        ghost.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        ghost.setPixmap(pix)
+        ghost.setWindowOpacity(0.82)
+        ghost.resize(pix.size())
+        ghost.show()
+        self._drag_ghost = ghost
+        self._drag_hotspot = QPoint(hot_spot)
+        self._drag_source = frame
+        self._drag_name = name
+        self._drag_slot = next(
+            (i for i, c in enumerate(self.provider_cards) if c["frame"] is frame),
+            -1,
+        )
+        self._drag_hidden_children = []
+        for child in list(frame.children()):
+            if isinstance(child, QWidget) and child.isVisible():
+                self._drag_hidden_children.append(child)
+                child.hide()
+        frame.setMinimumHeight(max(72, pix.height()))
+        frame.setProperty("dragging", True)
+        frame.style().unpolish(frame)
+        frame.style().polish(frame)
+        frame.setCursor(Qt.ClosedHandCursor)
+        frame.grabMouse()
+        gp = frame.mapToGlobal(hot_spot)
+        self._move_card_drag(gp)
+
+    def _drag_target_index(self, global_pos: QPoint) -> int | None:
+        if not self._drag_source or not self._snap or not self._drag_name:
+            return None
+        by_name = {p.name: p for p in self._snap.providers}
+        src = by_name.get(self._drag_name)
+        if not src:
+            return None
+        src_crit = self._is_provider_crit(src)
+        group = [
+            (i, c)
+            for i, c in enumerate(self.provider_cards)
+            if (p := by_name.get(c["name"])) and self._is_provider_crit(p) == src_crit
+        ]
+        if not group:
+            return None
+        # Default: end of own group
+        insert = group[-1][0] + 1
+        for i, card in group:
+            frame = card["frame"]
+            if frame is self._drag_source:
+                continue
+            top = frame.mapToGlobal(QPoint(0, 0)).y()
+            mid = top + frame.height() // 2
+            if global_pos.y() < mid:
+                insert = i
+                break
+        # Convert "insert before index" to final index after removing source
+        cur = self._drag_slot
+        if cur < 0:
+            return None
+        final = insert
+        if insert > cur:
+            final = insert - 1
+        final = max(group[0][0], min(final, group[-1][0]))
+        return final
+
+    def _apply_drag_slot(self, new_idx: int) -> None:
+        if new_idx == self._drag_slot or self._drag_slot < 0:
+            return
+        if new_idx < 0 or new_idx >= len(self.provider_cards):
+            return
+        item = self.provider_cards.pop(self._drag_slot)
+        self.provider_cards.insert(new_idx, item)
+        self._drag_slot = new_idx
+        # Rebuild layout order without destroying cards
+        while self.cards_layout.count():
+            self.cards_layout.takeAt(0)
+        for card in self.provider_cards:
+            self.cards_layout.addWidget(card["frame"])
+        self.cards_layout.addStretch(1)
+        if self._drag_source is not None:
+            self._drag_source.grabMouse()
+
+    def _move_card_drag(self, global_pos: QPoint) -> None:
+        ghost = self._drag_ghost
+        if ghost is not None:
+            ghost.move(global_pos - self._drag_hotspot)
+        idx = self._drag_target_index(global_pos)
+        if idx is not None:
+            self._apply_drag_slot(idx)
+
+    def _end_card_drag(self) -> None:
+        if self._drag_source is not None:
+            try:
+                self._drag_source.releaseMouse()
+            except RuntimeError:
+                pass
+            for child in self._drag_hidden_children:
+                try:
+                    child.show()
+                except RuntimeError:
+                    pass
+            self._drag_hidden_children = []
+            self._drag_source.setMinimumHeight(0)
+            self._drag_source.setProperty("dragging", False)
+            self._drag_source.style().unpolish(self._drag_source)
+            self._drag_source.style().polish(self._drag_source)
+            self._drag_source.setCursor(Qt.PointingHandCursor)
+            self._drag_source = None
+        self._drag_name = ""
+        self._drag_slot = -1
+        if self._drag_ghost is not None:
+            self._drag_ghost.hide()
+            self._drag_ghost.deleteLater()
+            self._drag_ghost = None
+
+    def _reorder_provider(self, name: str, target: str) -> None:
+        if not self._snap or name == target:
+            return
+        by_name = {p.name: p for p in self._snap.providers}
+        names = [c["name"] for c in self.provider_cards]
+        if name not in names or target not in names:
+            return
+        a, b = by_name.get(name), by_name.get(target)
         if not a or not b or self._is_provider_crit(a) != self._is_provider_crit(b):
             return
-        names[idx], names[j] = names[j], names[idx]
+        names.remove(name)
+        names.insert(names.index(target), name)
         self._save_provider_order(names + self._load_hidden())
         self._apply(self._snap)
+
+    def _provider_context_menu(self, name: str, global_pos: QPoint) -> None:
+        menu = QMenu(self)
+        hide_act = menu.addAction(self.t("usage_hide_menu"))
+        chosen = menu.exec(global_pos)
+        if chosen is hide_act:
+            self._hide_provider(name)
 
     def set_warn_pct(self, pct: int) -> None:
         self._warn_pct = pct
@@ -2377,6 +2734,17 @@ class UsageOverlay(QWidget):
         self._refresh_segment_states()
         if self._snap:
             self._apply(self._snap)
+
+    def set_pct_decimals(self, decimals: int) -> None:
+        if decimals not in PCT_DECIMALS:
+            return
+        self._pct_decimals = decimals
+        self._settings.setValue("pct_decimals", decimals)
+        self._refresh_segment_states()
+        if self._snap:
+            self._apply(self._snap)
+        else:
+            self._apply_language()
 
     def _hide_provider(self, name: str) -> None:
         hidden = self._load_hidden()
@@ -2417,6 +2785,8 @@ class UsageOverlay(QWidget):
             self.ud_title.setText(self.t("no_data"))
             self.ud_plan.hide()
             self.ud_reset.hide()
+            self.ud_model.hide()
+            self.ud_usage.hide()
             self.ud_error.hide()
             return
         self.ud_title.setText(_display_name(provider.name))
@@ -2426,12 +2796,20 @@ class UsageOverlay(QWidget):
         resets = [self.tx(m.reset_text) for m in provider.meters if m.reset_text]
         self.ud_reset.setText(resets[0] if resets else "")
         self.ud_reset.setVisible(bool(resets))
+        model_text = self.t("model_label").format(name=provider.model) if provider.model else ""
+        self.ud_model.setText(model_text)
+        self.ud_model.setVisible(bool(model_text))
+        usage_text = self.tx(provider.usage_line) if provider.usage_line else ""
+        self.ud_usage.setText(usage_text)
+        self.ud_usage.setVisible(bool(usage_text))
         self.ud_error.setText(self.tx(provider.error))
         self.ud_error.setVisible(bool(provider.error))
         usable = [m for m in provider.meters if m.remaining_percent is not None or m.remaining_text]
         for meter in usable:
             row = MeterRow(compact=False)
-            row.set_meter(meter, self.tx, self.t("left"))
+            drop = self._recent_drops.get(f"{provider.name}|{meter.label}")
+            detail = self._pct_drop_text(drop) if drop is not None else ""
+            row.set_meter(meter, self.tx, self.t("left"), detail=detail, pct_fmt=self._pct_left)
             self.ud_body.addWidget(row)
         if not usable and not provider.error:
             empty = QLabel(self.t("no_data"))
@@ -2519,7 +2897,7 @@ class UsageOverlay(QWidget):
                     continue
             shown.append(row)
         if not shown:
-            if report.findings:
+            if report.findings or report.mcps or report.skills:
                 msg = self.t("ideas_filter_empty")
             elif report.chats:
                 msg = self.t("ideas_clear").format(chats=report.chats, tokens=f"{tokens:,}".replace(",", "."))
@@ -2548,6 +2926,58 @@ class UsageOverlay(QWidget):
                     )
                 )
         self.ideas_layout.addStretch(1)
+
+    def _fill_tips(self) -> None:
+        while self.tips_layout.count():
+            item = self.tips_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        report = self._coach
+        if not self._chat_analysis:
+            self.tips_layout.addWidget(self._idea_label(self.t("ideas_need_chat"), "ideaBody"))
+            self.tips_layout.addStretch(1)
+            return
+        if report is None:
+            self.tips_layout.addWidget(self._idea_label(self.t("ideas_wait"), "ideaBody"))
+            self.tips_layout.addStretch(1)
+            return
+        if report.error:
+            self.tips_layout.addWidget(self._idea_label(self.tx(report.error), "error"))
+            self.tips_layout.addStretch(1)
+            return
+        tips = report.tips
+        if not tips:
+            self.tips_layout.addWidget(self._idea_label(self.t("ideas_none"), "ideaBody"))
+            self.tips_layout.addStretch(1)
+            return
+        self.tips_layout.addWidget(self._idea_label(self.t("tips_title"), "pageTitle"))
+        self.tips_layout.addWidget(self._idea_label(self.t("tips_hint"), "ideaBody"))
+        for tip in tips:
+            helpers = tip.helpers
+            title = self.t(f"{tip.code}_p")
+            if tip.code in ("tip_mcp", "tip_skill") and tip.detail:
+                title = self.t(f"{tip.code}_p").format(name=tip.detail)
+            fix = self.t(f"{tip.code}_f")
+            if tip.code in ("tip_mcp", "tip_skill") and tip.detail:
+                fix = self.t(f"{tip.code}_f").format(name=tip.detail)
+            elif tip.code == "tip_path" and helpers:
+                fix = self.t("tip_path_f").format(tools=", ".join(helpers[:3]))
+            self.tips_layout.addWidget(
+                self._idea_card(
+                    "info",
+                    self.t("tips_card_source"),
+                    "",
+                    tip.detail or ", ".join(helpers) or self.t("tips_card_source"),
+                    title,
+                    f"{self.t('ideas_fix')}: {fix}",
+                    code=tip.code,
+                    helpers=helpers,
+                    count=1,
+                    title_text=self.t("tips_card_title"),
+                )
+            )
+        self.tips_layout.addStretch(1)
 
     def _idea_label(self, text: str, name: str) -> QLabel:
         label = QLabel(text)
@@ -2608,13 +3038,28 @@ class UsageOverlay(QWidget):
         if self._detail_count > 1:
             meta.append(self.t("ideas_count").format(n=self._detail_count))
         self._detail_meta.setText(" · ".join(x for x in meta if x))
-        if code in ("mcp", "skill"):
-            self._detail_problem.setText(snippet)
-            self._detail_cause.setText(self.t("ideas_detail_info_cause"))
-            self._detail_solution.setText(self.t("ideas_detail_info_solution"))
-            self._detail_suggest_text = ""
-            show_ex = False
-            show_suggest = False
+        if code in ("mcp", "skill") or code.startswith("tip_"):
+            if code.startswith("tip_"):
+                problem = self.t(f"{code}_p")
+                fix = self.t(f"{code}_f")
+                if code in ("tip_mcp", "tip_skill") and helpers:
+                    problem = problem.format(name=helpers[0])
+                    fix = fix.format(name=helpers[0])
+                elif code == "tip_path" and helpers:
+                    fix = fix.format(tools=", ".join(helpers[:3]))
+                self._detail_problem.setText(problem)
+                self._detail_cause.setText(self.t("tips_detail_cause"))
+                self._detail_solution.setText(fix)
+                self._detail_suggest_text = fix
+                show_ex = bool(snippet.strip())
+                show_suggest = True
+            else:
+                self._detail_problem.setText(snippet)
+                self._detail_cause.setText(self.t("ideas_detail_info_cause"))
+                self._detail_solution.setText(self.t("ideas_detail_info_solution"))
+                self._detail_suggest_text = ""
+                show_ex = False
+                show_suggest = False
         elif code:
             self._detail_problem.setText(self.t(f"issue_{code}_p"))
             self._detail_cause.setText(self.t(f"issue_{code}_c"))
@@ -2649,6 +3094,7 @@ class UsageOverlay(QWidget):
         code: str = "",
         helpers: list[str] | None = None,
         count: int = 1,
+        title_text: str = "",
     ) -> QFrame:
         card = QFrame()
         card.setObjectName("ideaCard")
@@ -2663,7 +3109,7 @@ class UsageOverlay(QWidget):
         icon.setFixedSize(_IDEA_GLYPH_PX, _IDEA_GLYPH_PX)
         box = QVBoxLayout()
         head = QHBoxLayout()
-        title = QLabel(self.t("ideas_prompt"))
+        title = QLabel(title_text or self.t("ideas_prompt"))
         title.setObjectName("ideaTitle")
         date = QLabel(when)
         date.setObjectName("ideaDate")
@@ -2726,7 +3172,12 @@ class UsageOverlay(QWidget):
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         self._sync_mask()
+        self._apply_poll_interval()
         QTimer.singleShot(0, self._fit_to_content)
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        super().hideEvent(event)
+        self._apply_poll_interval()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -2741,21 +3192,35 @@ class UsageOverlay(QWidget):
         screen = QGuiApplication.primaryScreen().availableGeometry()
         self.resize(380, min(640, screen.height() - 48))
 
+    def _idea_detail_back(self) -> None:
+        if str(getattr(self, "_detail_code", "")).startswith("tip_"):
+            self.goto("tips")
+        else:
+            self.goto("ideas")
+
     def goto(self, page: str) -> None:
         self._page = page
         self._show_page()
-        if page == "ideas":
+        if page in ("ideas", "tips"):
             if self._chat_analysis:
                 self._start_coach()
             else:
                 self._coach = None
                 self._fill_ideas()
+                self._fill_tips()
         elif page == "usage_detail":
             self._populate_usage_detail()
 
     def _show_page(self) -> None:
         self.pages.setCurrentIndex(
-            {"usage": 0, "ideas": 1, "idea_detail": 2, "usage_detail": 3, "settings": 4}[self._page]
+            {
+                "usage": 0,
+                "ideas": 1,
+                "tips": 2,
+                "idea_detail": 3,
+                "usage_detail": 4,
+                "settings": 5,
+            }[self._page]
         )
         self._sync_nav()
 
@@ -2766,10 +3231,35 @@ class UsageOverlay(QWidget):
         self.goto("settings")
 
     def set_interval(self, seconds: int) -> None:
+        if seconds not in INTERVALS:
+            return
         self._interval = seconds
         self._settings.setValue("interval", seconds)
-        self.timer.setInterval(seconds * 1000)
+        self._apply_poll_interval()
         self._apply_language()
+        if self._live_state != "err":
+            fetching = bool(self._worker and self._worker.isRunning())
+            if fetching:
+                self._set_live_state("busy")
+            elif seconds <= 5:
+                self._set_live_state("live")
+            else:
+                self._set_live_state("idle")
+        else:
+            self._sync_live_icon(force=True)
+        if self._quota_access and not self._for_test:
+            QTimer.singleShot(0, self.refresh)
+
+    def _poll_seconds(self) -> int:
+        # Live (5s) only while window is open; throttle in tray to spare quota APIs.
+        if self._interval <= 5 and not self.isVisible():
+            return 30
+        return self._interval
+
+    def _apply_poll_interval(self) -> None:
+        self.timer.setInterval(self._poll_seconds() * 1000)
+        if self._quota_access and self._auto_fetch and not self._for_test:
+            self.timer.start()
 
     def _pin_changed(self, on: bool) -> None:
         self._pinned = on
@@ -2829,6 +3319,10 @@ class UsageOverlay(QWidget):
         self.chat_btn.blockSignals(True)
         self.chat_btn.setChecked(True)
         self.chat_btn.blockSignals(False)
+        _set_startup(True)
+        self.boot_btn.blockSignals(True)
+        self.boot_btn.setChecked(True)
+        self.boot_btn.blockSignals(False)
         if self._auto_fetch and not self._for_test:
             self.timer.start()
             QTimer.singleShot(0, self.refresh)
@@ -2886,16 +3380,18 @@ class UsageOverlay(QWidget):
         else:
             self.timer.stop()
             self.refresh()
+        self._sync_live_icon(force=True)
 
     def _chat_changed(self, on: bool) -> None:
         self._chat_analysis = on
         self._settings.setValue("chat_analysis", on)
-        if self._page == "ideas":
+        if self._page in ("ideas", "tips"):
             if on:
                 self._start_coach()
             else:
                 self._coach = None
                 self._fill_ideas()
+                self._fill_tips()
 
     def hide_to_tray(self) -> None:
         self.setVisible(False)
@@ -2907,6 +3403,7 @@ class UsageOverlay(QWidget):
             self.setVisible(False)
         else:
             self._restore_pin_after_show = False
+        self._apply_poll_interval()
         icon = make_icon()
         self.tray.setIcon(icon)
         self.tray.show()
@@ -2927,11 +3424,19 @@ class UsageOverlay(QWidget):
             self.setWindowFlags(flags)
             self.setAttribute(Qt.WA_TranslucentBackground, True)
             self._restore_pin_after_show = False
+        self.setWindowState((self.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
         self.show()
         self.raise_()
         self.activateWindow()
+        if sys.platform == "win32":
+            try:
+                import ctypes
+
+                ctypes.windll.user32.SetForegroundWindow(int(self.winId()))
+            except Exception:
+                pass
         if self._auto_fetch and not self._for_test and self._quota_access:
-            self.timer.start()
+            self._apply_poll_interval()
             if not self._snap:
                 QTimer.singleShot(0, self.refresh)
         self._sync_mask()
@@ -2954,7 +3459,7 @@ class UsageOverlay(QWidget):
         if event.button() != Qt.LeftButton:
             return
         kid = self.childAt(event.position().toPoint())
-        if kid in (self.grip, self.logo_badge, self.title, self.subtitle, self.stamp) or kid is None:
+        if kid in (self.grip, self.logo_badge, self.title, self.subtitle, self.live_icon, self.stamp) or kid is None:
             self._drag = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
@@ -2966,7 +3471,6 @@ class UsageOverlay(QWidget):
 
     def refresh(self) -> None:
         if not self._quota_access:
-            self.loading_label.hide()
             self.usage_summary.hide()
             self._snap = UsageSnapshot(checked_at=datetime.now().strftime("%H:%M:%S"))
             self.global_error.hide()
@@ -2980,13 +3484,13 @@ class UsageOverlay(QWidget):
             empty.setObjectName("meterMeta")
             self.cards_layout.addWidget(empty)
             self.cards_layout.addStretch(1)
+            self._sync_live_icon(force=True)
             return
         if self._worker and self._worker.isRunning():
             return
-        if self.isVisible() and self._page == "usage":
-            self.loading_label.setText(self.t("loading"))
-            self.loading_label.show()
+        if self.isVisible() and self._page == "usage" and not self.provider_cards:
             self._show_usage_skeleton()
+        self._set_live_state("busy")
         self._worker = FetchWorker(allow_quota=True, parent=self)
         self._worker.finished_ok.connect(self._apply, Qt.ConnectionType.UniqueConnection)
         self._worker.failed.connect(self._fail, Qt.ConnectionType.UniqueConnection)
@@ -2994,10 +3498,10 @@ class UsageOverlay(QWidget):
 
     def _apply(self, snap: UsageSnapshot) -> None:
         try:
-            self.loading_label.hide()
             self._snap = snap
             self.global_error.hide()
             items = self._ordered_providers(snap.providers)
+            self._recent_drops = self._collect_drops(items)
             self._set_usage_summary(items, snap.checked_at)
             names = [p.name for p in items]
             if self.provider_cards and [c["name"] for c in self.provider_cards] == names:
@@ -3030,9 +3534,9 @@ class UsageOverlay(QWidget):
             )
             if ranked:
                 worst, low = ranked[0]
-                tip = self.t("tray_lowest").format(name=_display_name(worst.name), n=low)
+                tip = self.t("tray_lowest").format(name=_display_name(worst.name), n=self._pct_num(low))
                 more = [
-                    f"{_display_name(p.name)} {v:.0f}%"
+                    f"{_display_name(p.name)} {self._pct_num(v)}%"
                     for p, v in ranked[1:4]
                 ]
                 if more:
@@ -3042,6 +3546,7 @@ class UsageOverlay(QWidget):
                 self.tray.setToolTip(self.t("title"))
             if self._page == "usage_detail":
                 self._populate_usage_detail()
+            self._set_live_state("live" if self._interval <= 5 else "idle")
         except Exception:
             self._fail("error.generic")
 
@@ -3049,11 +3554,13 @@ class UsageOverlay(QWidget):
         if not self._chat_analysis:
             self._coach = None
             self._fill_ideas()
+            self._fill_tips()
             return
         if self._coach_worker and self._coach_worker.isRunning():
             return
         self._coach = None
         self._fill_ideas()
+        self._fill_tips()
         self._coach_worker = CoachWorker(allow_chat=True, parent=self)
         self._coach_worker.finished_ok.connect(self._apply_coach)
         self._coach_worker.failed.connect(self._fail_coach)
@@ -3064,16 +3571,84 @@ class UsageOverlay(QWidget):
             return
         self._coach = report
         self._fill_ideas()
+        self._fill_tips()
 
     def _fail_coach(self, message: str) -> None:
         self._coach = CoachReport(chats=0, chars=0, tools=0, error="error.generic")
         self._fill_ideas()
+        self._fill_tips()
 
     def _fail(self, message: str) -> None:
-        self.loading_label.hide()
         key = message if isinstance(message, str) and message.startswith("error.") else "error.generic"
+        if not self.provider_cards:
+            while self.cards_layout.count():
+                item = self.cards_layout.takeAt(0)
+                widget = item.widget()
+                if widget:
+                    widget.deleteLater()
+            self.cards_layout.addStretch(1)
         self.global_error.setText(self.tx(key))
         self.global_error.show()
+        self._set_live_state("err")
+
+    def _set_live_state(self, state: str) -> None:
+        if state == self._live_state and state != "busy":
+            self._sync_live_icon()
+            return
+        self._live_state = state
+        self._live_blink_on = True
+        self._sync_live_icon(force=True)
+
+    def _sync_live_icon(self, *, force: bool = False) -> None:
+        if not hasattr(self, "live_icon"):
+            return
+        if not self._quota_access:
+            self.live_icon.hide()
+            self._live_pulse.stop()
+            return
+        self.live_icon.show()
+        err = self._live_state == "err"
+        kind = "live_err" if err else "live_ok"
+        color = _LIVE_ERR if err else _LIVE_OK
+        self.live_icon.setPixmap(_glyph(kind, color, _LIVE_GLYPH_PX))
+        blink = self._live_state in ("live", "busy", "err")
+        if blink:
+            self._live_pulse.setInterval(700 if err else 480)
+            if not self._live_pulse.isActive() or force:
+                self._live_blink_on = True
+                self._live_pulse.start()
+            self._live_opacity.setOpacity(1.0 if self._live_blink_on else (0.28 if err else 0.22))
+        else:
+            self._live_pulse.stop()
+            self._live_opacity.setOpacity(1.0)
+        tip_key = {
+            "live": "live_tip_on",
+            "busy": "live_tip_busy",
+            "err": "live_tip_err",
+            "idle": "live_tip_idle",
+        }.get(self._live_state, "live_tip_idle")
+        self.live_icon.setToolTip(self.t(tip_key))
+
+    def _pulse_live_icon(self) -> None:
+        if self._live_state not in ("live", "busy", "err"):
+            self._live_pulse.stop()
+            self._live_opacity.setOpacity(1.0)
+            return
+        self._live_blink_on = not self._live_blink_on
+        dim = 0.28 if self._live_state == "err" else 0.22
+        self._live_opacity.setOpacity(1.0 if self._live_blink_on else dim)
+
+    def _collect_drops(self, providers: list[ProviderUsage]) -> dict[str, float]:
+        drops: dict[str, float] = {}
+        for provider in providers:
+            for meter in provider.meters:
+                if meter.remaining_percent is None:
+                    continue
+                key = f"{provider.name}|{meter.label}"
+                drop = _pct_drop(self._last_pcts, key, meter.remaining_percent)
+                if drop is not None:
+                    drops[key] = drop
+        return drops
 
     def _fill(self, card: dict, provider: ProviderUsage) -> None:
         plan_text = self.tx(provider.plan) or ""
@@ -3091,12 +3666,12 @@ class UsageOverlay(QWidget):
         reset_text = reset_bits[0] if reset_bits else ""
         card["reset"].setText(reset_text)
         card["reset"].setVisible(bool(reset_text))
-        while card["body"].count():
-            item = card["body"].takeAt(0)
-            widget = item.widget()
-            if widget:
-                widget.deleteLater()
-        card["rows"] = []
+        model_text = self.t("model_label").format(name=provider.model) if provider.model else ""
+        card["model"].setText(model_text)
+        card["model"].setVisible(bool(model_text))
+        usage_text = self.tx(provider.usage_line) if provider.usage_line else ""
+        card["usage"].setText(usage_text)
+        card["usage"].setVisible(bool(usage_text))
         usable = [m for m in meters if m.remaining_percent is not None or m.remaining_text]
         lowest = _provider_lowest(provider)
         critical = lowest is not None and lowest < self._crit_pct
@@ -3104,6 +3679,12 @@ class UsageOverlay(QWidget):
         card["frame"].style().unpolish(card["frame"])
         card["frame"].style().polish(card["frame"])
         if not meters and not provider.error:
+            while card["body"].count():
+                item = card["body"].takeAt(0)
+                widget = item.widget()
+                if widget:
+                    widget.deleteLater()
+            card["rows"] = []
             empty = QLabel(self.t("no_data"))
             empty.setObjectName("meterMeta")
             card["body"].addWidget(empty)
@@ -3111,8 +3692,11 @@ class UsageOverlay(QWidget):
         if usable:
             primary = usable[0]
             if primary.remaining_percent is not None:
-                pct_text = self.t("left_short").format(n=primary.remaining_percent)
+                pct_text = self._pct_left_short(primary.remaining_percent)
                 tone = _tone_for(primary.remaining_percent, self._warn_pct, self._crit_pct)
+                drop = self._recent_drops.get(f"{provider.name}|{primary.label}")
+                if drop is not None:
+                    pct_text = f"{pct_text}{self._pct_drop_text(drop)}"
             else:
                 pct_text = self.tx(primary.remaining_text)
                 tone = ""
@@ -3121,9 +3705,24 @@ class UsageOverlay(QWidget):
             card["pct"].style().unpolish(card["pct"])
             card["pct"].style().polish(card["pct"])
             card["pct"].setVisible(bool(pct_text))
+        rows = card.get("rows") or []
+        if rows and len(rows) == len(usable):
+            for i, (row, meter) in enumerate(zip(rows, usable)):
+                drop = self._recent_drops.get(f"{provider.name}|{meter.label}") if i > 0 else None
+                detail = self._pct_drop_text(drop) if drop is not None else ""
+                row.set_meter(meter, self.tx, self.t("left"), detail=detail, pct_fmt=self._pct_left)
+            return
+        while card["body"].count():
+            item = card["body"].takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        card["rows"] = []
         for i, meter in enumerate(usable):
             row = MeterRow(compact=True, hide_value=(i == 0))
-            row.set_meter(meter, self.tx, self.t("left"))
+            drop = self._recent_drops.get(f"{provider.name}|{meter.label}") if i > 0 else None
+            detail = self._pct_drop_text(drop) if drop is not None else ""
+            row.set_meter(meter, self.tx, self.t("left"), detail=detail, pct_fmt=self._pct_left)
             card["body"].addWidget(row)
             card["rows"].append(row)
         detail_text = next((self.tx(m.detail) for m in meters if m.detail), "")
@@ -3156,7 +3755,7 @@ class UsageOverlay(QWidget):
             for n in hidden
         ]
         self.usage_hidden_row.setText(
-            self.t("usage_hidden_hint").format(n=len(hidden)) + " · " + " · ".join(bits)
+            self.t("usage_hidden_hint").format(n=len(hidden)) + "<br>" + " · ".join(bits)
         )
         self.usage_hidden_row.show()
 
@@ -3175,45 +3774,48 @@ class UsageOverlay(QWidget):
         self.cards_layout.addStretch(1)
 
 
-def _startup_cmd() -> str:
-    if getattr(sys, "frozen", False):
-        return f'"{sys.executable}"'
-    pyw = Path(sys.executable).with_name("pythonw.exe")
-    py = pyw if pyw.exists() else Path(sys.executable)
-    return f'"{py}" "{ROOT / "overlay.py"}"'
+def _ping_existing_instance() -> bool:
+    sock = QLocalSocket()
+    sock.connectToServer(_INSTANCE_SOCK)
+    if not sock.waitForConnected(400):
+        return False
+    sock.write(b"raise")
+    sock.flush()
+    sock.waitForBytesWritten(1000)
+    sock.disconnectFromServer()
+    return True
 
 
-def _startup_on() -> bool:
-    try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY)
-        for name in (RUN_NAME, _RUN_LEGACY, "TokenTakip"):
-            try:
-                winreg.QueryValueEx(key, name)
-                return True
-            except OSError:
-                continue
-    except OSError:
-        pass
-    return False
+def _bind_single_instance(win: UsageOverlay, server: QLocalServer) -> None:
+    def _raise_existing() -> None:
+        conn = server.nextPendingConnection()
+        if conn is None:
+            return
+        conn.waitForReadyRead(300)
+        conn.readAll()
+        conn.disconnectFromServer()
+        win.show_normal()
+
+    server.newConnection.connect(_raise_existing)
+    server.setParent(win)
 
 
-def _set_startup(on: bool) -> None:
-    key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN_KEY)
-    if on:
-        winreg.SetValueEx(key, RUN_NAME, 0, winreg.REG_SZ, _startup_cmd())
-        try:
-            winreg.DeleteValue(key, _RUN_LEGACY)
-        except FileNotFoundError:
-            pass
-    else:
-        for name in (RUN_NAME, _RUN_LEGACY, "TokenTakip"):
-            try:
-                winreg.DeleteValue(key, name)
-            except FileNotFoundError:
-                pass
+def _start_single_instance_server() -> QLocalServer | None:
+    QLocalServer.removeServer(_INSTANCE_SOCK)
+    server = QLocalServer()
+    if server.listen(_INSTANCE_SOCK):
+        return server
+    if _ping_existing_instance():
+        return None
+    QLocalServer.removeServer(_INSTANCE_SOCK)
+    return server if server.listen(_INSTANCE_SOCK) else None
 
 
 def main() -> int:
+    ok, err = platform_ok()
+    if not ok:
+        show_platform_error(err)
+        return 1
     if sys.platform == "win32":
         try:
             import ctypes
@@ -3222,6 +3824,11 @@ def main() -> int:
         except Exception:
             pass
     app = QApplication(sys.argv)
+    if _ping_existing_instance():
+        return 0
+    instance_server = _start_single_instance_server()
+    if instance_server is None:
+        return 0
     app.setQuitOnLastWindowClosed(False)
     app.setOrganizationName(SETTINGS_ORG)
     app.setApplicationName(SETTINGS_ORG)
@@ -3230,8 +3837,13 @@ def main() -> int:
     app.setFont(QFont("Segoe UI", 10))
     win = UsageOverlay()
     if not win._license_granted:
+        instance_server.close()
         return 1
-    win.show()
+    _bind_single_instance(win, instance_server)
+    if STARTUP_ARG in sys.argv:
+        win.hide_to_tray()
+    else:
+        win.show()
     return app.exec()
 
 

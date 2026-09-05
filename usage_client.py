@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from platform_util import gh_cli_args, home as _home, local as _local, program_roots, roaming as _roaming, subprocess_flags
+
 
 CURSOR_CLIENT_ID = "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB"
 CURSOR_API = "https://api2.cursor.sh"
@@ -56,6 +58,8 @@ class Meter:
 class ProviderUsage:
     name: str
     plan: str = ""
+    model: str = ""
+    usage_line: str = ""
     meters: list[Meter] = field(default_factory=list)
     error: str = ""
 
@@ -151,7 +155,7 @@ def remaining_of(used: float | None) -> float | None:
     return max(0.0, min(100.0, 100.0 - float(used)))
 
 
-def _cursor_meters() -> tuple[str, list[Meter]]:
+def _cursor_meters() -> tuple[str, list[Meter], str]:
     token = _cursor_access_token()
     headers = {
         "Authorization": f"Bearer {token}",
@@ -167,6 +171,7 @@ def _cursor_meters() -> tuple[str, list[Meter]]:
 
     plan_usage = usage.get("planUsage") or {}
     meters: list[Meter] = []
+    usage_line = _cursor_usage_line(plan_usage if isinstance(plan_usage, dict) else {})
 
     total_used = _finite(plan_usage.get("totalPercentUsed"))
     if total_used is None:
@@ -236,7 +241,7 @@ def _cursor_meters() -> tuple[str, list[Meter]]:
                 detail=f"fmt.limit|{_usd(pooled_limit)}",
             )
         )
-    return title, meters
+    return title, meters, usage_line
 
 
 def _codex_meters() -> tuple[str, list[Meter]]:
@@ -256,7 +261,7 @@ def _codex_from_cli() -> tuple[str, list[Meter]] | None:
             capture_output=True,
             text=True,
             timeout=4,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            creationflags=subprocess_flags(),
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return None
@@ -400,7 +405,7 @@ def _cursor_access_token() -> str:
 
 
 def _cursor_auth_values() -> dict[str, str]:
-    db_path = Path(os.environ.get("APPDATA", "")) / "Cursor" / "User" / "globalStorage" / "state.vscdb"
+    db_path = _roaming("Cursor", "User", "globalStorage", "state.vscdb")
     if not db_path.exists():
         raise _SafeError("error.session")
     keys = (
@@ -575,8 +580,7 @@ def _usd(amount: float | None) -> str:
 def _percent_left(remaining: float | None) -> str:
     if remaining is None:
         return "—"
-    n = remaining if remaining >= 10 else round(remaining, 1)
-    return f"left|{n}"
+    return f"left|{remaining:.4f}"
 
 
 def _money_left(amount: float | None) -> str:
@@ -632,18 +636,6 @@ def _unix_reset(value: Any) -> str:
     return f"reset.in_mins|{minutes}|{dt.strftime('%H:%M')}"
 
 
-def _home(*parts: str) -> Path:
-    return Path.home().joinpath(*parts)
-
-
-def _roaming(*parts: str) -> Path:
-    return Path(os.environ.get("APPDATA", "")).joinpath(*parts)
-
-
-def _local(*parts: str) -> Path:
-    return Path(os.environ.get("LOCALAPPDATA", "")).joinpath(*parts)
-
-
 def _any_exists(*paths: Path) -> bool:
     return any(path.exists() for path in paths)
 
@@ -653,8 +645,7 @@ def _cmd_exists(name: str) -> bool:
 
 
 def _run_text(args: list[str]) -> str:
-    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-    proc = subprocess.run(args, capture_output=True, text=True, timeout=12, creationflags=flags)
+    proc = subprocess.run(args, capture_output=True, text=True, timeout=12, creationflags=subprocess_flags())
     if proc.returncode != 0:
         return ""
     return (proc.stdout or "").strip()
@@ -667,11 +658,7 @@ def _github_token() -> str:
     token = _github_token_from_hosts()
     if token:
         return token
-    paths = [
-        ["gh", "auth", "token"],
-        [str(_local("Programs", "GitHub CLI", "gh.exe")), "auth", "token"],
-        [r"C:\Program Files\GitHub CLI\gh.exe", "auth", "token"],
-    ]
+    paths = gh_cli_args()
     for args in paths:
         if args[0] != "gh" and not Path(args[0]).exists():
             continue
@@ -712,13 +699,7 @@ def _installed(name: str, detail: str) -> ProviderUsage:
 
 def _folder_names() -> list[str]:
     names: list[str] = []
-    folders = (
-        _local("Programs"),
-        _roaming("Microsoft", "Windows", "Start Menu", "Programs"),
-        Path(os.environ.get("ProgramFiles", r"C:\Program Files")),
-        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")),
-    )
-    for folder in folders:
+    for folder in program_roots():
         try:
             if folder.exists():
                 names.extend(item.name.lower() for item in folder.iterdir())
@@ -756,9 +737,221 @@ def github_token() -> str:
     return _github_token()
 
 
+def _fmt_count(n: int | float) -> str:
+    return f"{int(n):,}".replace(",", ".")
+
+
+def _codex_token_usage() -> str:
+    root = _home(".codex")
+    if not root.is_dir():
+        return ""
+    files = sorted(root.rglob("rollout-*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for path in files[:8]:
+        total, last = _codex_tokens_from_rollout(path)
+        if total is None:
+            continue
+        if last is not None and last > 0:
+            return f"tokens_used_turn|{_fmt_count(total)}|{_fmt_count(last)}"
+        return f"tokens_used|{_fmt_count(total)}"
+    return ""
+
+
+def _codex_tokens_from_rollout(path: Path) -> tuple[int | None, int | None]:
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            if size > 500_000:
+                fh.seek(-500_000, 2)
+                fh.readline()
+            text = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None, None
+    total = last = None
+    for line in text.splitlines():
+        if '"token_count"' not in line or "total_tokens" not in line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        payload = obj.get("payload") if isinstance(obj, dict) else None
+        info = payload.get("info") if isinstance(payload, dict) else None
+        if not isinstance(info, dict):
+            continue
+        usage = info.get("total_token_usage")
+        if isinstance(usage, dict) and usage.get("total_tokens") is not None:
+            try:
+                total = int(usage["total_tokens"])
+            except (TypeError, ValueError):
+                pass
+        turn = info.get("last_token_usage")
+        if isinstance(turn, dict) and turn.get("total_tokens") is not None:
+            try:
+                last = int(turn["total_tokens"])
+            except (TypeError, ValueError):
+                pass
+    return total, last
+
+
+def _cursor_usage_line(plan_usage: dict[str, Any]) -> str:
+    spent = _cents(plan_usage.get("totalSpend"))
+    included = _cents(plan_usage.get("includedSpend"))
+    limit = _cents(plan_usage.get("limit"))
+    if spent is None and included is None:
+        return ""
+    if spent is not None and limit:
+        return f"spend_used|{_usd(spent)}|{_usd(limit)}"
+    if spent is not None and included is not None:
+        return f"spend_used|{_usd(spent)}|{_usd(included)}"
+    if spent is not None:
+        return f"spend_only|{_usd(spent)}"
+    return ""
+
+
+def _pretty_model(raw: str) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    aliases = {
+        "gpt-6-astra": "GPT-6 Astra",
+        "gpt-5.6-sol": "GPT-5.6 Sol",
+        "composer-2.5": "Composer 2.5",
+        "composer-2.5-fast": "Composer 2.5 Fast",
+        "composer-2": "Composer 2",
+        "composer-1.5": "Composer 1.5",
+        "composer-1": "Composer 1",
+        "default": "Auto",
+        "grok-4.6": "Grok 4.6",
+        "cursor-grok-4.6": "Grok 4.6",
+    }
+    if text in aliases:
+        return aliases[text]
+    return text.replace("-", " ").replace("_", " ")
+
+
+def _cursor_selected_model() -> str:
+    db_path = _roaming("Cursor", "User", "globalStorage", "state.vscdb")
+    if not db_path.exists():
+        return ""
+    try:
+        rows = _read_sqlite_kv(db_path, ("cursor/applicationOpenModelAppliedConfig",))
+    except Exception:
+        return ""
+    raw = rows.get("cursor/applicationOpenModelAppliedConfig") or ""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return ""
+    selected = data.get("selectedModels") if isinstance(data, dict) else None
+    if not isinstance(selected, list) or not selected:
+        return ""
+    first = selected[0] if isinstance(selected[0], dict) else {}
+    model = str(first.get("modelId") or "").strip()
+    parts = [_pretty_model(model)] if model else []
+    params = first.get("parameters") if isinstance(first.get("parameters"), list) else []
+    for param in params:
+        if not isinstance(param, dict):
+            continue
+        pid = str(param.get("id") or "")
+        val = str(param.get("value") or "")
+        if pid == "effort" and val and val != "false":
+            parts.append(val)
+        if pid == "fast" and val == "true":
+            parts.append("fast")
+    if data.get("maxMode"):
+        parts.append("max")
+    return " · ".join(parts)
+
+
+def _codex_selected_model() -> str:
+    root = _home(".codex")
+    if not root.is_dir():
+        return ""
+    files = sorted(root.rglob("rollout-*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for path in files[:6]:
+        model = _codex_model_from_rollout(path)
+        if model:
+            return model
+    return ""
+
+
+def _codex_model_from_rollout(path: Path) -> str:
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            if size > 400_000:
+                fh.seek(-400_000, 2)
+                fh.readline()
+            text = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    found = ""
+    for line in text.splitlines():
+        if "thread_settings_applied" not in line or '"model"' not in line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        payload = obj.get("payload") if isinstance(obj, dict) else None
+        settings = payload.get("thread_settings") if isinstance(payload, dict) else None
+        if not isinstance(settings, dict):
+            continue
+        model = str(settings.get("model") or "").strip()
+        if model:
+            found = _pretty_model(model)
+    return found
+
+
+def _claude_selected_model() -> str:
+    for path in (
+        _home(".claude", "settings.json"),
+        _home(".claude", "settings.local.json"),
+    ):
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        for key in ("model", "defaultModel", "preferredModel"):
+            val = str(data.get(key) or "").strip()
+            if val:
+                return _pretty_model(val)
+    return ""
+
+
+def _gemini_selected_model() -> str:
+    for path in (
+        _home(".gemini", "settings.json"),
+        _home(".gemini", "config.json"),
+    ):
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        for key in ("model", "defaultModel", "selectedModel"):
+            val = str(data.get(key) or "").strip()
+            if val:
+                return _pretty_model(val)
+    return ""
+
+
 def _load_cursor() -> ProviderUsage:
-    plan, meters = _cursor_meters()
-    return ProviderUsage(name="CURSOR", plan=plan, meters=meters)
+    plan, meters, usage_line = _cursor_meters()
+    return ProviderUsage(
+        name="CURSOR",
+        plan=plan,
+        model=_cursor_selected_model(),
+        usage_line=usage_line,
+        meters=meters,
+    )
 
 
 def _detect_cursor() -> bool:
@@ -767,7 +960,44 @@ def _detect_cursor() -> bool:
 
 def _load_codex() -> ProviderUsage:
     plan, meters = _codex_meters()
-    return ProviderUsage(name="CODEX", plan=plan, meters=meters)
+    model = _codex_selected_model() or _codex_model_from_usage_api()
+    return ProviderUsage(
+        name="CODEX",
+        plan=plan,
+        model=model,
+        usage_line=_codex_token_usage(),
+        meters=meters,
+    )
+
+
+def _codex_model_from_usage_api() -> str:
+    try:
+        auth = _codex_auth()
+        token = auth.get("access_token") or ""
+        if not token:
+            return ""
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+        account_id = auth.get("account_id") or ""
+        if account_id:
+            headers["ChatGPT-Account-Id"] = str(account_id)
+        payload = None
+        for url in CODEX_USAGE_URLS:
+            try:
+                payload = _json_get(url, headers)
+                break
+            except Exception:
+                continue
+        if not isinstance(payload, dict):
+            return ""
+        usage = payload.get("model_usage")
+        if not isinstance(usage, dict) or not usage:
+            return ""
+        for name, info in usage.items():
+            if isinstance(info, dict) and info.get("available"):
+                return _pretty_model(str(name))
+        return _pretty_model(next(iter(usage)))
+    except Exception:
+        return ""
 
 
 def _detect_codex() -> bool:
@@ -818,7 +1048,12 @@ def _load_claude() -> ProviderUsage:
             )
         )
     tier = str(oauth.get("rateLimitTier") or "")
-    return ProviderUsage(name="CLAUDE", plan=tier.title(), meters=meters or [Meter(label="meter.status", remaining_text="meter.no_quota")])
+    return ProviderUsage(
+        name="CLAUDE",
+        plan=tier.title(),
+        model=_claude_selected_model(),
+        meters=meters or [Meter(label="meter.status", remaining_text="meter.no_quota")],
+    )
 
 
 def _detect_gemini() -> bool:
@@ -855,7 +1090,16 @@ def _load_gemini() -> ProviderUsage:
                 reset_text=_iso_reset(bucket.get("resetTime")),
             )
         )
-    return ProviderUsage(name="GEMINI", meters=meters or [Meter(label="meter.status", remaining_text="meter.no_quota")])
+    model = _gemini_selected_model()
+    if not model and meters:
+        label = meters[0].label
+        if label and not label.startswith("meter."):
+            model = _pretty_model(label)
+    return ProviderUsage(
+        name="GEMINI",
+        model=model,
+        meters=meters or [Meter(label="meter.status", remaining_text="meter.no_quota")],
+    )
 
 
 def _detect_copilot() -> bool:
