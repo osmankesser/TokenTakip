@@ -39,6 +39,7 @@ from PySide6.QtCore import (
     QThread,
     QTime,
     QTimer,
+    QUrl,
     Signal,
 )
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
@@ -46,6 +47,7 @@ from PySide6.QtGui import (
     QAction,
     QColor,
     QFont,
+    QDesktopServices,
     QGuiApplication,
     QIcon,
     QImage,
@@ -63,7 +65,9 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFrame,
+    QGraphicsDropShadowEffect,
     QGraphicsOpacityEffect,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QMenu,
@@ -83,6 +87,23 @@ if str(ROOT) not in sys.path:
 
 from lang_packs import TEXTS, validate_langs  # noqa: E402
 from prompt_coach import CoachReport, Finding, PATHY, build_report  # noqa: E402
+from agent_advice import build_agent_advice  # noqa: E402
+from agent_catalog import discover_agent_kits  # noqa: E402
+from agent_story import build_agent_story  # noqa: E402
+from github_live import (  # noqa: E402
+    LiveProject,
+    build_guide,
+    fetch_top_projects,
+    get_project,
+    localize_blurb,
+    localize_guide,
+    ranked_live,
+)
+from weekly_projects import (  # noqa: E402
+    CAT_ORDER,
+    agents_from_providers,
+    detect_local_agents,
+)
 from usage_client import Meter, ProviderUsage, UsageSnapshot, _sort_key, fetch_snapshot  # noqa: E402
 
 THEMES = ("night", "frost", "aurora", "ember")
@@ -267,6 +288,10 @@ DOMAINS = {
     "GROQ": "groq.com",
     "QWEN": "tongyi.aliyun.com",
     "CLINE": "cline.bot",
+    "MANUS": "manus.im",
+    "CODEIUM": "codeium.com",
+    "KIRO": "kiro.dev",
+    "WARP": "warp.dev",
 }
 _ICON_MEM: dict[str, QPixmap] = {}
 _LOGO_CUT: QPixmap | None = None
@@ -274,8 +299,19 @@ _LOGO_TRIM: QPixmap | None = None
 _LOGO_HEADER_PX = 40
 _PROVIDER_ICON_PX = 32
 _PROVIDER_MARK_PX = 40
-_NAV_GLYPH_PX = 24
+_NAV_GLYPH_PX = 16
+_NAV_AGENTS_GLYPH_PX = 18
+_NAV_BUBBLE = 34
 _NAV_ICON_CACHE: dict[tuple[str, str], QPixmap] = {}
+
+# React NavbarTabs tarzı veri — page anahtarı + glif
+NAV_ITEMS: tuple[dict[str, str], ...] = (
+    {"kind": "kota", "page": "usage", "label": "usage"},
+    {"kind": "ideas", "page": "ideas", "label": "ideas"},
+    {"kind": "agents", "page": "agents", "label": "agents_nav"},
+    {"kind": "github", "page": "github", "label": "github_nav"},
+    {"kind": "settings", "page": "settings", "label": "settings"},
+)
 _ACTION_GLYPH_PX = 20
 _STAT_GLYPH_PX = 22
 _IDEA_GLYPH_PX = 26
@@ -283,6 +319,8 @@ _FLUENT = {
     "kota": 0xE9D2,
     "ideas": 0xEA80,
     "tips": 0xE74B,
+    "agents": 0xE716,  # People — nav boyutu için net; özel sarılma okunmuyordu
+    "github": 0xE8F1,
     "chat": 0xE8BD,
     "settings": 0xE713,
     "close": 0xE711,
@@ -427,16 +465,145 @@ def _letter_pix(name: str, size: int = 36) -> QPixmap:
     return pix
 
 
+# Offline brand marks — no network (privacy: no favicon URLs in overlay).
+_BRAND: dict[str, tuple[str, str]] = {
+    "CURSOR": ("#1d4ed8", "Cu"),
+    "CLAUDE": ("#d97757", "✦"),
+    "CODEX": ("#10a37f", "Cx"),
+    "CHATGPT": ("#10a37f", "GPT"),
+    "OLLAMA": ("#111827", "Ol"),
+    "GEMINI": ("#4285f4", "Ge"),
+    "COPILOT": ("#2ea8ff", "Co"),
+    "WINDSURF": ("#0ea5e9", "Ws"),
+    "ANTIGRAVITY": ("#ea4335", "Ag"),
+    "CONTINUE": ("#22c55e", "Ct"),
+    "TRAE": ("#a855f7", "Tr"),
+    "LM STUDIO": ("#6366f1", "LM"),
+    "TABNINE": ("#1368e0", "T9"),
+    "AMAZON Q": ("#ff9900", "Q"),
+    "JETBRAINS AI": ("#fe315d", "JB"),
+    "AIDER": ("#0f766e", "Ai"),
+    "GROQ": ("#f55036", "Gq"),
+    "QWEN": ("#6a3de8", "Qw"),
+    "CLINE": ("#eab308", "Cn"),
+    "MANUS": ("#7c3aed", "Ma"),
+    "CODEIUM": ("#09b6a2", "Cd"),
+    "KIRO": ("#f59e0b", "Ki"),
+    "WARP": ("#01a4ef", "Wp"),
+}
+
+
+def _brand_pix(name: str, size: int = 36) -> QPixmap:
+    key = name.upper()
+    if key == "COPILOT":
+        return _copilot_pix(size)
+    color_hex, label = _BRAND.get(key, ("#64748b", (name[:1] or "?").upper()))
+    pix = QPixmap(size, size)
+    pix.fill(Qt.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setRenderHint(QPainter.TextAntialiasing)
+    p.setBrush(QColor(color_hex))
+    p.setPen(Qt.NoPen)
+    p.drawRoundedRect(1, 1, size - 2, size - 2, size * 0.22, size * 0.22)
+    p.setPen(QColor("#ffffff"))
+    scale = 0.28 if len(label) >= 3 else (0.34 if len(label) == 2 else 0.42)
+    p.setFont(QFont("Segoe UI", max(7, int(size * scale)), QFont.Bold))
+    p.drawText(pix.rect(), Qt.AlignCenter, label)
+    p.end()
+    return pix
+
+
+def _icon_files(name: str) -> list[Path]:
+    """Yerel .ico/.png/.exe adayları — ağ yok."""
+    key = name.upper()
+    local = Path(os.environ.get("LOCALAPPDATA", ""))
+    roaming = Path(os.environ.get("APPDATA", ""))
+    pf = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+    pkgs = local / "Packages"
+    out: list[Path] = []
+    hits: dict[str, list[Path]] = {
+        "OLLAMA": [
+            local / "Programs" / "Ollama" / "app.ico",
+            local / "Programs" / "Ollama" / "Ollama.exe",
+        ],
+        "CHATGPT": [
+            local / "Microsoft" / "WindowsApps" / "chatgpt-classic.exe",
+            local / "Programs" / "ChatGPT" / "ChatGPT.exe",
+        ],
+        "CLAUDE": [
+            local / "Claude" / "Claude.exe",
+            local / "Programs" / "Claude" / "Claude.exe",
+            pf / "Claude" / "Claude.exe",
+        ],
+        "CURSOR": [
+            local / "Programs" / "cursor" / "Cursor.exe",
+            local / "Programs" / "Cursor" / "Cursor.exe",
+        ],
+        "WINDSURF": [local / "Programs" / "Windsurf" / "Windsurf.exe"],
+        "TRAE": [local / "Programs" / "Trae" / "Trae.exe"],
+        "LM STUDIO": [local / "Programs" / "LM Studio" / "LM Studio.exe"],
+    }
+    out.extend(hits.get(key, []))
+    # Store package logos (best-effort)
+    prefixes = {
+        "CLAUDE": "Claude_",
+        "CHATGPT": "OpenAI.ChatGPT",
+        "CODEX": "OpenAI.Codex",
+        "MANUS": "Manus",
+    }
+    prefix = prefixes.get(key)
+    if prefix and pkgs.is_dir():
+        try:
+            for pkg in pkgs.iterdir():
+                if not pkg.name.startswith(prefix):
+                    continue
+                for pat in ("**/icon-128.png", "**/logo*.png", "**/StoreLogo*.png", "**/AppList*.png"):
+                    for path in pkg.glob(pat):
+                        if path.is_file() and 400 < path.stat().st_size < 400_000:
+                            out.append(path)
+                            if len(out) > 12:
+                                return out
+        except OSError:
+            pass
+    return out
+
+
+def _pix_from_file(path: Path, size: int) -> QPixmap | None:
+    if not path.is_file():
+        return None
+    if path.suffix.lower() == ".exe":
+        return _pix_from_exe(path, size)
+    pix = QPixmap(str(path))
+    if pix.isNull():
+        icon = QIcon(str(path))
+        if icon.isNull():
+            return None
+        pix = icon.pixmap(size, size)
+    if pix.isNull():
+        return None
+    return pix.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+
 def _exe_for(name: str) -> Path | None:
     key = name.upper()
     local = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs"
     roaming = Path(os.environ.get("APPDATA", ""))
     pf = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+    la = Path(os.environ.get("LOCALAPPDATA", ""))
     hits = {
         "CURSOR": [local / "cursor" / "Cursor.exe", local / "Cursor" / "Cursor.exe"],
         "OLLAMA": [local / "Ollama" / "Ollama.exe", pf / "Ollama" / "Ollama.exe"],
-        "CHATGPT": [local / "ChatGPT" / "ChatGPT.exe", pf / "ChatGPT" / "ChatGPT.exe"],
-        "CLAUDE": [local / "Claude" / "Claude.exe", pf / "Claude" / "Claude.exe"],
+        "CHATGPT": [
+            la / "Microsoft" / "WindowsApps" / "chatgpt-classic.exe",
+            local / "ChatGPT" / "ChatGPT.exe",
+            pf / "ChatGPT" / "ChatGPT.exe",
+        ],
+        "CLAUDE": [
+            la / "Claude" / "Claude.exe",
+            local / "Claude" / "Claude.exe",
+            pf / "Claude" / "Claude.exe",
+        ],
         "WINDSURF": [local / "Windsurf" / "Windsurf.exe"],
         "TRAE": [local / "Trae" / "Trae.exe"],
         "LM STUDIO": [local / "LM Studio" / "LM Studio.exe"],
@@ -512,18 +679,45 @@ def provider_pix(name: str, size: int = 36) -> QPixmap:
     key = f"{name}:{size}"
     if key in _ICON_MEM:
         return _ICON_MEM[key]
-    if name.upper() == "COPILOT":
-        pix = _copilot_pix(size)
-        _ICON_MEM[key] = pix
-        return pix
-    exe = _exe_for(name)
-    pix = _pix_from_exe(exe, size) if exe else None
+    pix = _pix_from_cache(name, size)
     if pix is None:
-        pix = _pix_from_cache(name, size)
+        exe = _exe_for(name)
+        pix = _pix_from_exe(exe, size) if exe else None
     if pix is None:
-        pix = _letter_pix(name, size)
+        for path in _icon_files(name):
+            pix = _pix_from_file(path, size)
+            if pix is not None:
+                break
+    if pix is None:
+        pix = _brand_pix(name, size)
     _ICON_MEM[key] = pix
     return pix
+
+
+def _round_provider_pix(name: str, size: int = 56) -> QPixmap:
+    """Yuvarlak kırpılmış ajan logosu."""
+    key = f"round:{name}:{size}"
+    if key in _ICON_MEM:
+        return _ICON_MEM[key]
+    src = provider_pix(name, size)
+    scaled = src.scaled(size, size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+    out = QPixmap(size, size)
+    out.fill(Qt.transparent)
+    p = QPainter(out)
+    p.setRenderHint(QPainter.Antialiasing)
+    path = QPainterPath()
+    path.addEllipse(0.5, 0.5, size - 1, size - 1)
+    p.setClipPath(path)
+    x = (size - scaled.width()) // 2
+    y = (size - scaled.height()) // 2
+    p.drawPixmap(x, y, scaled)
+    p.setClipping(False)
+    p.setPen(QPen(QColor(255, 255, 255, 40), 1))
+    p.setBrush(Qt.NoBrush)
+    p.drawEllipse(1, 1, size - 2, size - 2)
+    p.end()
+    _ICON_MEM[key] = out
+    return out
 
 
 def _pix_has_ink(pix: QPixmap) -> bool:
@@ -556,7 +750,9 @@ def _font_pix(ch: str, color: QColor, size: int, families: tuple[str, ...], scal
 def _glyph(kind: str, color: QColor, size: int = 22, phase: float = 0.0, press: float = 0.0) -> QPixmap:
     cp = _FLUENT.get(kind)
     if cp is not None:
-        pix = _font_pix(chr(cp), color, size, ("Segoe Fluent Icons", "Segoe MDL2 Assets"), 0.78)
+        # People glifi diğerlerinden daha geniş; aynı kutuda kenarlara yapışmasın.
+        scale = 0.68 if kind == "agents" else 0.78
+        pix = _font_pix(chr(cp), color, size, ("Segoe Fluent Icons", "Segoe MDL2 Assets"), scale)
         if _pix_has_ink(pix):
             return pix
     pix = QPixmap(size, size)
@@ -591,6 +787,23 @@ def _glyph(kind: str, color: QColor, size: int = 22, phase: float = 0.0, press: 
         p.drawLine(QPointF(c.x(), r.bottom() - 6), QPointF(c.x() - 5, r.bottom() - 12))
         p.drawLine(QPointF(c.x(), r.bottom() - 6), QPointF(c.x() + 5, r.bottom() - 12))
         p.drawLine(QPointF(r.left() + 3, r.bottom() - 2), QPointF(r.right() - 3, r.bottom() - 2))
+    elif kind == "agents":
+        # Fluent People yoksa yedek: iki kafa + omuz
+        hr = r.width() * 0.16
+        lx = r.left() + r.width() * 0.30
+        rx = r.right() - r.width() * 0.30
+        ly = r.top() + r.height() * 0.28
+        p.drawEllipse(QPointF(lx, ly), hr, hr)
+        p.drawEllipse(QPointF(rx, ly), hr, hr)
+        p.drawArc(QRectF(lx - hr * 1.3, ly + hr * 0.5, hr * 2.6, r.height() * 0.65), 25 * 16, 130 * 16)
+        p.drawArc(QRectF(rx - hr * 1.3, ly + hr * 0.5, hr * 2.6, r.height() * 0.65), 25 * 16, 130 * 16)
+    elif kind == "github":
+        # simple repo mark: circle + fork-ish lines
+        c = r.center()
+        p.drawEllipse(QPointF(c.x(), c.y() - 2), r.width() * 0.22, r.width() * 0.22)
+        p.drawLine(QPointF(c.x(), c.y() + 2), QPointF(c.x(), r.bottom() - 3))
+        p.drawLine(QPointF(c.x(), c.y() + 4), QPointF(r.right() - 4, r.bottom() - 6))
+        p.drawEllipse(QPointF(r.right() - 4, r.bottom() - 6), 2.2, 2.2)
     elif kind == "live_ok":
         c = r.center()
         rad = r.width() * 0.28
@@ -842,8 +1055,46 @@ def _pct_drop(store: dict[str, float], key: str, pct: float | None) -> float | N
 
 
 def _display_name(name: str) -> str:
-    m = {"CHATGPT": "ChatGPT", "CODEX": "Codex", "CURSOR": "Cursor", "OLLAMA": "Ollama", "LM STUDIO": "LM Studio"}
+    m = {"CHATGPT": "ChatGPT", "CODEX": "Codex", "CURSOR": "Cursor", "OLLAMA": "Ollama", "LM STUDIO": "LM Studio", "MANUS": "Manus", "VS CODE": "VS Code"}
     return m.get(name.upper(), name.title())
+
+
+_KIT_PROVIDER = {
+    "Cursor": "CURSOR",
+    "Codex": "CODEX",
+    "Claude": "CLAUDE",
+    "Copilot": "COPILOT",
+    "VS Code": "VS CODE",
+}
+
+
+def _kit_for_provider(name: str):
+    key = name.upper()
+    for kit in discover_agent_kits():
+        mapped = _KIT_PROVIDER.get(kit.agent, kit.agent.upper())
+        if mapped == key or kit.agent.upper() == key:
+            return kit
+    return None
+
+
+def _agent_logo_names(providers) -> list[str]:
+    """Kota listesi + yerel kit ajanları — logo ızgarası sırası."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for p in providers or []:
+        n = getattr(p, "name", None) or str(p)
+        key = n.upper()
+        if key in seen:
+            continue
+        seen.add(key)
+        names.append(n)
+    for kit in discover_agent_kits():
+        mapped = _KIT_PROVIDER.get(kit.agent)
+        if not mapped or mapped in seen:
+            continue
+        seen.add(mapped)
+        names.append(mapped)
+    return names
 
 
 def _idea_kind(code: str) -> str:
@@ -950,7 +1201,17 @@ def _theme_css(theme: str) -> str:
     return f"""
 QFrame#contentArea {{ background: {p["content"]}; }}
 QFrame#headerLine {{ background: {p["line"]}; }}
-QFrame#navBar {{ border-top: 1px solid {p["line"]}; }}
+QFrame#navBar {{ border: none; background: transparent; }}
+QWidget#navWrap {{ background: transparent; }}
+QWidget#navTab {{ background: transparent; }}
+QLabel#navBubble, QWidget#navBubble {{
+    background: transparent; border: none;
+}}
+QFrame#navHomeLine {{
+    background: {p["faint"]}; border: none; border-radius: 2px; max-height: 3px;
+}}
+QLabel#navText {{ color: {p["muted"]}; }}
+QLabel#navText[active="true"] {{ color: {a}; font-weight: 800; }}
 QWidget#listInner {{ background: {p["content"]}; }}
 QScrollArea#list {{ background: transparent; border: none; }}
 QLabel {{ color: {p["text"]}; }}
@@ -1014,6 +1275,61 @@ QPushButton#orderBtn:hover {{ color: {p["title"]}; background: {p["segment"]}; }
 QFrame#iconMark {{
     background: {p["icon_mark"]}; border: none; border-radius: 20px;
 }}
+QPushButton#agentLogoBtn {{
+    background: transparent; border: none; border-radius: 32px; padding: 0;
+}}
+QPushButton#agentLogoBtn:hover {{
+    background: {p["segment"]};
+}}
+QLabel#agentLogoName {{
+    color: {p["text"]}; font-size: 10px; font-weight: 700;
+}}
+QLabel#ghCat {{
+    color: {p["muted"]}; font-size: 10px; font-weight: 700; letter-spacing: 0.2px;
+}}
+QLabel#ghRank {{
+    color: {p["accent_deep"]}; background: {p["accent_soft"]};
+    border: 1px solid {p["accent_border"]}; border-radius: 10px;
+    font-size: 11px; font-weight: 800;
+}}
+QFrame#ghFilterBar {{
+    background: {p["segment"]}; border: none; border-radius: 12px;
+}}
+QFrame#ghTile {{
+    background: {p["card"]}; border: 1px solid {p["card_border"]}; border-radius: 12px;
+}}
+QFrame#ghTile:hover {{
+    background: {p["accent_soft"]}; border-color: {p["field_border"]};
+}}
+QLabel#ghTileTitle {{
+    color: {p["title"]}; font-size: 12px; font-weight: 800;
+}}
+QLabel#ghTileRepo {{
+    color: {p["faint"]}; font-size: 9px; font-weight: 600;
+}}
+QLabel#ghTileBody {{
+    color: {p["muted"]}; font-size: 10px;
+}}
+QLabel#ghCode {{
+    color: {p["text"]}; background: {p["segment"]};
+    border: 1px solid {p["line"]}; border-radius: 8px;
+    padding: 8px; font-family: Consolas, 'Courier New', monospace; font-size: 10px;
+}}
+QLabel#ghCatChip {{
+    color: {p["accent_deep"]}; background: {p["accent_soft"]};
+    border: 1px solid {p["accent_border"]}; border-radius: 8px;
+    padding: 2px 6px; font-size: 9px; font-weight: 800;
+}}
+QLabel#ghFitChip {{
+    color: {p["success"]}; background: {p["success_soft"]};
+    border-radius: 8px; padding: 2px 6px; font-size: 9px; font-weight: 700;
+}}
+QLabel#ghFitChip[kind="partial"] {{
+    color: {p["text"]}; background: {p["segment"]};
+}}
+QLabel#ghFitChip[kind="gap"] {{
+    color: {p["muted"]}; background: transparent; border: 1px solid {p["line"]};
+}}
 QFrame#segment {{ background: {p["segment"]}; }}
 QPushButton#segBtn {{ color: {p["text"]}; }}
 QPushButton#segBtn[active="true"] {{
@@ -1026,7 +1342,6 @@ QComboBox {{
 QComboBox::down-arrow {{ border-top-color: {p["muted"]}; }}
 QLabel#navText {{ color: {p["muted"]}; }}
 QLabel#navText[active="true"] {{ color: {a}; font-weight: 800; }}
-QLabel#navIcon[active="true"] {{ background: {p["accent_soft"]}; }}
 QFrame#ideaCard[kind="warn"] QLabel#ideaBody,
 QFrame#ideaCard[kind="warn"] QLabel#ideaTitle,
 QFrame#ideaCard[kind="warn"] QLabel#ideaFix,
@@ -1056,8 +1371,20 @@ QFrame#contentArea {
     background: transparent; border: none; border-radius: 0px;
 }
 QFrame#navBar {
-    background: transparent; border: none; border-top: 1px solid #eef2f6;
+    background: transparent; border: none;
 }
+QWidget#navWrap { background: transparent; }
+QWidget#navTab { background: transparent; }
+QLabel#navBubble, QWidget#navBubble {
+    background: transparent; border: none;
+}
+QFrame#navHomeLine {
+    background: #94a3b8; border: none; border-radius: 2px; max-height: 3px;
+}
+QLabel#navIcon { background: transparent; border-radius: 17px; padding: 5px; min-width: 44px; }
+QLabel#navIcon[active="true"] { background: #dbeafe; }
+QLabel#navText { font-size: 10px; font-weight: 700; color: #64748b; }
+QLabel#navText[active="true"] { color: #2563eb; }
 QStackedWidget, QStackedWidget > QWidget { background: transparent; border: none; }
 QLabel { color: #1e293b; background: transparent; }
 QLabel#welcomeTitle { font-size: 15px; font-weight: 800; color: #0f172a; }
@@ -1078,6 +1405,64 @@ QLabel#planLocal {
 }
 QFrame#iconMark {
     background: #f8fafc; border: none; border-radius: 20px;
+}
+QPushButton#agentLogoBtn {
+    background: transparent; border: none; border-radius: 32px; padding: 0;
+}
+QPushButton#agentLogoBtn:hover {
+    background: #e2e8f0;
+}
+QLabel#agentLogoName {
+    color: #334155; font-size: 10px; font-weight: 700;
+}
+QLabel#ghCat {
+    color: #64748b; font-size: 10px; font-weight: 700;
+}
+QLabel#ghRank {
+    color: #075985; background: #e0f2fe;
+    border: 1px solid #bae6fd; border-radius: 10px;
+    font-size: 11px; font-weight: 800;
+}
+QFrame#ghFilterBar {
+    background: #e8f2fc; border: none; border-radius: 12px;
+}
+QFrame#ghTile {
+    background: #ffffff; border: 1px solid #dbeafe; border-radius: 12px;
+}
+QFrame#ghTile:hover {
+    background: #eff6ff; border-color: #93c5fd;
+}
+QLabel#ghTileTitle {
+    color: #0f172a; font-size: 12px; font-weight: 800;
+}
+QLabel#ghTileRepo {
+    color: #94a3b8; font-size: 9px; font-weight: 600;
+}
+QLabel#ghTileBody {
+    color: #64748b; font-size: 10px;
+}
+QLabel#ghCode {
+    color: #1e293b; background: #e8f2fc;
+    border: 1px solid #dbeafe; border-radius: 8px;
+    padding: 8px; font-family: Consolas, 'Courier New', monospace; font-size: 10px;
+}
+QLabel#ghCatChip {
+    color: #075985; background: #e0f2fe;
+    border: 1px solid #bae6fd; border-radius: 8px;
+    padding: 2px 6px; font-size: 9px; font-weight: 800;
+}
+QLabel#ghFitChip {
+    color: #047857; background: #d1fae5;
+    border-radius: 8px; padding: 2px 6px; font-size: 9px; font-weight: 700;
+}
+QLabel#ghFitChip[kind="partial"] {
+    color: #334155; background: #e2e8f0;
+}
+QLabel#ghFitChip[kind="gap"] {
+    color: #64748b; background: transparent; border: 1px solid #e2e8f0;
+}
+QLabel#ghTileBadge {
+    color: #0369a1; font-size: 9px; font-weight: 700;
 }
 QFrame#cardSkeleton {
     background: #f1f5f9; border: 1px solid #e8ecf1; border-radius: 14px; min-height: 88px;
@@ -1187,6 +1572,44 @@ class FetchWorker(QThread):
             self.failed.emit("error.generic")
 
 
+class GhFetchWorker(QThread):
+    finished_ok = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, *, force: bool = False, parent=None):
+        super().__init__(parent)
+        self._force = force
+
+    def run(self) -> None:
+        try:
+            if self.isInterruptionRequested():
+                return
+            self.finished_ok.emit(fetch_top_projects(force=self._force))
+        except Exception:
+            self.failed.emit("error.generic")
+
+
+class GhLocalizeWorker(QThread):
+    """GitHub açıklamalarını arka planda UI diline çevir."""
+
+    finished_ok = Signal(str, object)  # lang, {repo: text}
+
+    def __init__(self, pairs: list[tuple[str, str]], lang: str, parent=None):
+        super().__init__(parent)
+        self._pairs = pairs
+        self._lang = lang
+
+    def run(self) -> None:
+        try:
+            out: dict[str, str] = {}
+            for repo, text in self._pairs:
+                if self.isInterruptionRequested():
+                    return
+                out[repo] = localize_blurb(text, self._lang) if text else ""
+            self.finished_ok.emit(self._lang, out)
+        except Exception:
+            self.finished_ok.emit(self._lang, {})
+
 
 _BAR_H = 12
 
@@ -1214,6 +1637,17 @@ def _bar_fill_color(theme: str, remaining: float, warn: float = 40, crit: float 
     if tone == "warn":
         return QColor(pal["bar_warn"])
     return QColor(pal["bar_ok"])
+
+
+class _ClickFrame(QFrame):
+    """Tıklanabilir kutu — QPushButton child layout’u ezmez."""
+
+    clicked = Signal()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
 
 
 class Bar(QWidget):
@@ -1292,7 +1726,7 @@ class _CardInteractFilter(QObject):
                 if isinstance(child, QPushButton):
                     return False
                 child = child.parentWidget()
-            self._overlay._open_usage_detail(self._name)
+            self._overlay._open_usage_detail(self._name, from_page="usage")
             return False
         return False
 
@@ -1346,49 +1780,170 @@ class MeterRow(QWidget):
 
 
 
+class NavPill(QFrame):
+    """Yuvarlak pill bar — üstte floating bubble için boşluk bırakır."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("navBar")
+        self.setFixedHeight(60)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        theme = "frost"
+        win = self.window()
+        if isinstance(win, UsageOverlay):
+            theme = win._theme
+        pal = THEME_PALETTE.get(theme, THEME_PALETTE["frost"])
+        fill, border = QColor(pal["card"]), QColor(pal["card_border"])
+        rect = QRectF(1, 12, self.width() - 2, self.height() - 16)
+        path = QPainterPath()
+        path.addRoundedRect(rect, rect.height() / 2, rect.height() / 2)
+        p.setPen(QPen(border, 1))
+        p.setBrush(fill)
+        p.drawPath(path)
+
+
+class NavBubble(QWidget):
+    """Sadece paint — stylesheet/layout yok (takılma/flicker önler)."""
+
+    def __init__(self, owner: "NavTab"):
+        super().__init__(owner)
+        self._owner = owner
+        self.setObjectName("navBubble")
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAutoFillBackground(False)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        o = self._owner
+        lift = o._lift
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        top = o._IDLE_TOP * (1.0 - lift)
+        cx = self.width() * 0.5
+        cy = top + _NAV_BUBBLE * 0.5
+        rad = _NAV_BUBBLE * 0.5
+        if lift > 0.01:
+            accent = o._accent()
+            p.setPen(Qt.NoPen)
+            glow = QColor(accent.red(), accent.green(), accent.blue(), int(85 * lift))
+            p.setBrush(glow)
+            p.drawEllipse(QPointF(cx, cy + 2.0), rad + 3.0, rad + 3.0)
+            fill = QColor(accent.red(), accent.green(), accent.blue(), int(255 * lift))
+            p.setBrush(fill)
+            p.drawEllipse(QPointF(cx, cy), rad - 0.5, rad - 0.5)
+        pix = o._pix
+        if not pix.isNull():
+            p.drawPixmap(int(cx - pix.width() / 2), int(cy - pix.height() / 2), pix)
+
+
 class NavTab(QWidget):
+    """Floating-circle sekme — ortadaki pill nav stili."""
+
+    _IDLE_TOP = 12
+    _ANIM_MS = 240
+
     def __init__(self, overlay: "UsageOverlay", kind: str, page: str, parent=None):
         super().__init__(parent)
         self._overlay = overlay
         self.setObjectName("navTab")
         self.setAccessibleName(page + "Btn")
         self.setCursor(Qt.PointingHandCursor)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
         self._kind, self._page = kind, page
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(2, 4, 2, 2)
-        lay.setSpacing(2)
-        self.icon = QLabel()
-        self.icon.setObjectName("navIcon")
-        self.icon.setFixedSize(50, 34)
-        self.icon.setAlignment(Qt.AlignCenter)
-        self.icon.setScaledContents(False)
+        self.setMinimumHeight(48)
+        self._lay = QVBoxLayout(self)
+        self._lay.setContentsMargins(0, 0, 0, 0)
+        self._lay.setSpacing(0)
+        self.bubble = NavBubble(self)
+        self._lay.addWidget(self.bubble)
         self.text = QLabel()
         self.text.setObjectName("navText")
-        self.text.setAlignment(Qt.AlignCenter)
-        self.text.setWordWrap(True)
-        lay.addWidget(self.icon, 0, Qt.AlignHCenter)
-        lay.addWidget(self.text)
+        self.text.hide()
         self._active = None
+        self._hover = False
+        self._lift = 0.0
+        self._pix = QPixmap()
+        self._icon_key: tuple | None = None
+        self._anim = QPropertyAnimation(self, b"lift", self)
+        self._anim.setDuration(self._ANIM_MS)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._sync_icon()
 
     def set_text(self, label: str) -> None:
         self.text.setText(label)
+        self.setToolTip(label)
+        self.setAccessibleName(label)
+
+    def _accent(self) -> QColor:
+        return self._overlay.theme_accent() if hasattr(self._overlay, "theme_accent") else QColor("#0369a1")
+
+    def _get_lift(self) -> float:
+        return self._lift
+
+    def _set_lift(self, value: float) -> None:
+        v = max(0.0, min(1.0, float(value)))
+        if abs(v - self._lift) < 0.0005:
+            return
+        self._lift = v
+        self._sync_icon()
+        self.bubble.update()
+
+    lift = Property(float, _get_lift, _set_lift)
 
     def set_active(self, on: bool, *, force: bool = False) -> None:
         if not force and self._active is on:
             return
         self._active = on
-        self.icon.setProperty("active", on)
-        self.text.setProperty("active", on)
-        color = self._overlay.theme_accent() if on else self._overlay.theme_muted()
-        key = (self._kind, color.name())
+        target = 1.0 if on else 0.0
+        self._anim.stop()
+        if force or abs(self._lift - target) < 0.001:
+            # lift aynı kalsa bile ikon boyansın (ilk pasif sekmeler boş kalıyordu)
+            self._lift = target
+            self._sync_icon()
+            self.bubble.update()
+            return
+        self._anim.setStartValue(self._lift)
+        self._anim.setEndValue(target)
+        self._anim.start()
+
+    def _sync_icon(self) -> None:
+        # İkon rengi lift’e bağlı: daire kaybolmadan muted’a düşmesin (yanıp sönme)
+        if self._lift >= 0.18:
+            color = QColor("#ffffff")
+        elif self._hover:
+            color = self._accent()
+        else:
+            color = self._overlay.theme_muted() if hasattr(self._overlay, "theme_muted") else QColor("#486581")
+        key = (self._kind, color.name(), "nav")
+        if key == self._icon_key and not self._pix.isNull():
+            return
+        self._icon_key = key
         pix = _NAV_ICON_CACHE.get(key)
         if pix is None:
-            pix = _glyph(self._kind, color, _NAV_GLYPH_PX)
+            size = _NAV_AGENTS_GLYPH_PX if self._kind == "agents" else _NAV_GLYPH_PX
+            pix = _glyph(self._kind, color, size)
             _NAV_ICON_CACHE[key] = pix
-        self.icon.setPixmap(pix)
-        for w in (self.icon, self.text):
-            w.style().unpolish(w)
-            w.style().polish(w)
+        self._pix = pix
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self._hover = True
+        self._icon_key = None
+        self._sync_icon()
+        self.bubble.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self._hover = False
+        self._icon_key = None
+        self._sync_icon()
+        self.bubble.update()
+        super().leaveEvent(event)
 
     def click(self) -> None:
         self._overlay.goto(self._page)
@@ -1465,6 +2020,9 @@ class UsageOverlay(QWidget):
             self._consent_seen = True
             self._warn_pct, self._crit_pct = 40, 15
             self._pct_decimals = 4
+            import auto_translate as _at
+
+            _at.FORCE_OFFLINE = True
         else:
             self._lang = str(self._settings.value("lang", "en"))
             if self._lang not in LANG_CODES:
@@ -1514,8 +2072,16 @@ class UsageOverlay(QWidget):
         self._coach_worker = None
         self._page = "usage"
         self._detail_provider: str | None = None
+        self._detail_from = "usage"
         self._idea_filter = "all"
         self._idea_source_filter = "all"
+        self._github_cat = "all"
+        self._gh_filter_btns: list[tuple[str, QPushButton]] = []
+        self._gh_projects: list[LiveProject] = []
+        self._gh_detail_repo: str | None = None
+        self._gh_worker: GhFetchWorker | None = None
+        self._gh_loc_worker: GhLocalizeWorker | None = None
+        self._gh_i18n: dict[tuple[str, str], str] = {}
         self._src_filter_btns: list[tuple[str, QPushButton]] = []
         self._quitting = False
         self._restore_pin_after_show = False
@@ -1674,23 +2240,79 @@ class UsageOverlay(QWidget):
         ideas_l.addWidget(ideas_scroll, 1)
         self.pages.addWidget(ideas_page)
 
-        tips_page = QWidget()
-        tips_l = QVBoxLayout(tips_page)
-        tips_l.setContentsMargins(0, 0, 0, 0)
-        tips_l.setSpacing(8)
-        tips_scroll = QScrollArea()
-        tips_scroll.setObjectName("list")
-        self._tips_scroll = tips_scroll
-        tips_scroll.setWidgetResizable(True)
-        tips_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.tips_inner = QWidget()
-        self.tips_inner.setObjectName("listInner")
-        self.tips_layout = QVBoxLayout(self.tips_inner)
-        self.tips_layout.setContentsMargins(0, 0, 0, 0)
-        self.tips_layout.setSpacing(8)
-        tips_scroll.setWidget(self.tips_inner)
-        tips_l.addWidget(tips_scroll, 1)
-        self.pages.addWidget(tips_page)
+        agents_page = QWidget()
+        agents_l = QVBoxLayout(agents_page)
+        agents_l.setContentsMargins(0, 0, 0, 0)
+        agents_l.setSpacing(8)
+        agents_scroll = QScrollArea()
+        agents_scroll.setObjectName("list")
+        self._agents_scroll = agents_scroll
+        agents_scroll.setWidgetResizable(True)
+        agents_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.agents_inner = QWidget()
+        self.agents_inner.setObjectName("listInner")
+        self.agents_layout = QVBoxLayout(self.agents_inner)
+        self.agents_layout.setContentsMargins(0, 0, 0, 0)
+        self.agents_layout.setSpacing(8)
+        agents_scroll.setWidget(self.agents_inner)
+        agents_l.addWidget(agents_scroll, 1)
+        self.pages.addWidget(agents_page)
+
+        github_page = QWidget()
+        github_l = QVBoxLayout(github_page)
+        github_l.setContentsMargins(0, 0, 0, 0)
+        github_l.setSpacing(8)
+        github_scroll = QScrollArea()
+        github_scroll.setObjectName("list")
+        self._github_scroll = github_scroll
+        github_scroll.setWidgetResizable(True)
+        github_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.github_inner = QWidget()
+        self.github_inner.setObjectName("listInner")
+        self.github_layout = QVBoxLayout(self.github_inner)
+        self.github_layout.setContentsMargins(0, 0, 0, 0)
+        self.github_layout.setSpacing(8)
+        github_scroll.setWidget(self.github_inner)
+        github_l.addWidget(github_scroll, 1)
+        self.pages.addWidget(github_page)
+
+        gh_detail_page = QWidget()
+        gd_l = QVBoxLayout(gh_detail_page)
+        gd_l.setContentsMargins(0, 0, 0, 0)
+        gd_l.setSpacing(8)
+        gd_head = QHBoxLayout()
+        self.gd_back = QPushButton(self.t("ideas_detail_back"))
+        self.gd_back.setObjectName("lookBtn")
+        self.gd_back.setCursor(Qt.PointingHandCursor)
+        self.gd_back.clicked.connect(lambda: self.goto("github"))
+        gd_head.addWidget(self.gd_back)
+        gd_head.addStretch(1)
+        self.gd_open = QPushButton(self.t("gh_open_web"))
+        self.gd_open.setObjectName("lookBtn")
+        self.gd_open.setCursor(Qt.PointingHandCursor)
+        self.gd_open.clicked.connect(self._open_github_web)
+        gd_head.addWidget(self.gd_open)
+        gd_l.addLayout(gd_head)
+        self.gd_title = QLabel("")
+        self.gd_title.setObjectName("pageTitle")
+        self.gd_title.setWordWrap(True)
+        gd_l.addWidget(self.gd_title)
+        self.gd_meta = QLabel("")
+        self.gd_meta.setObjectName("ideaSource")
+        self.gd_meta.setWordWrap(True)
+        gd_l.addWidget(self.gd_meta)
+        gd_scroll = QScrollArea()
+        gd_scroll.setObjectName("list")
+        gd_scroll.setWidgetResizable(True)
+        gd_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.gd_inner = QWidget()
+        self.gd_inner.setObjectName("listInner")
+        self.gd_body = QVBoxLayout(self.gd_inner)
+        self.gd_body.setContentsMargins(0, 0, 0, 0)
+        self.gd_body.setSpacing(8)
+        gd_scroll.setWidget(self.gd_inner)
+        gd_l.addWidget(gd_scroll, 1)
+        self.pages.addWidget(gh_detail_page)
 
         detail_page = QWidget()
         detail_l = QVBoxLayout(detail_page)
@@ -1781,7 +2403,7 @@ class UsageOverlay(QWidget):
         self.ud_back = QPushButton()
         self.ud_back.setObjectName("lookBtn")
         self.ud_back.setCursor(Qt.PointingHandCursor)
-        self.ud_back.clicked.connect(lambda: self.goto("usage"))
+        self.ud_back.clicked.connect(self._usage_detail_back)
         ud_head.addWidget(self.ud_back)
         ud_head.addStretch(1)
         self.ud_hide = QPushButton()
@@ -2040,18 +2662,45 @@ class UsageOverlay(QWidget):
         content_l.addWidget(self.pages, 1)
         root.addWidget(self.content, 1)
 
-        nav_bar = QFrame()
-        nav_bar.setObjectName("navBar")
-        nav = QHBoxLayout(nav_bar)
-        nav.setContentsMargins(0, 8, 0, 2)
-        nav.setSpacing(4)
-        self.home_btn = self._nav("kota", "usage")
-        self.ideas_btn = self._nav("ideas", "ideas")
-        self.tips_btn = self._nav("tips", "tips")
-        self.settings_btn = self._nav("settings", "settings")
-        for b in (self.home_btn, self.ideas_btn, self.tips_btn, self.settings_btn):
-            nav.addWidget(b, 1)
-        root.addWidget(nav_bar)
+        nav_wrap = QWidget()
+        nav_wrap.setObjectName("navWrap")
+        nav_wrap_l = QVBoxLayout(nav_wrap)
+        nav_wrap_l.setContentsMargins(14, 4, 14, 8)
+        nav_wrap_l.setSpacing(0)
+        nav_bar = NavPill()
+        shadow = QGraphicsDropShadowEffect(nav_bar)
+        shadow.setBlurRadius(22)
+        shadow.setOffset(0, 6)
+        shadow.setColor(QColor(15, 23, 42, 45))
+        nav_bar.setGraphicsEffect(shadow)
+        pill_l = QVBoxLayout(nav_bar)
+        pill_l.setContentsMargins(4, 0, 4, 6)
+        pill_l.setSpacing(0)
+        nav = QHBoxLayout()
+        nav.setContentsMargins(0, 0, 0, 0)
+        nav.setSpacing(0)
+        self._nav_btns: list[NavTab] = []
+        for item in NAV_ITEMS:
+            btn = self._nav(item["kind"], item["page"])
+            if item["page"] == "usage":
+                self.home_btn = btn
+            elif item["page"] == "ideas":
+                self.ideas_btn = btn
+            elif item["page"] == "agents":
+                self.agents_btn = btn
+            elif item["page"] == "github":
+                self.github_btn = btn
+            elif item["page"] == "settings":
+                self.settings_btn = btn
+            nav.addWidget(btn, 1)
+            self._nav_btns.append(btn)
+        pill_l.addLayout(nav, 1)
+        home_line = QFrame()
+        home_line.setObjectName("navHomeLine")
+        home_line.setFixedSize(72, 3)
+        pill_l.addWidget(home_line, 0, Qt.AlignHCenter)
+        nav_wrap_l.addWidget(nav_bar)
+        root.addWidget(nav_wrap)
         self.provider_cards = []
 
         self.tray = QSystemTrayIcon(make_icon(), self)
@@ -2186,6 +2835,8 @@ class UsageOverlay(QWidget):
         self._lang = lang
         self._settings.setValue("lang", lang)
         self._apply_language()
+        if self._page in ("github", "github_detail"):
+            self._start_gh_localize()
         if self._snap:
             self._apply(self._snap)
 
@@ -2321,10 +2972,8 @@ class UsageOverlay(QWidget):
         self.tray_btn.setToolTip(self.t("hide_tray"))
         self.close_btn.setToolTip(self.t("close"))
         self._sync_header_colors()
-        self.home_btn.set_text(self.t("usage"))
-        self.ideas_btn.set_text(self.t("ideas"))
-        self.tips_btn.set_text(self.t("tips_nav"))
-        self.settings_btn.set_text(self.t("settings"))
+        for btn, item in zip(self._nav_btns, NAV_ITEMS):
+            btn.set_text(self.t(item["label"]))
         self.settings_title.setText(self.t("settings"))
         self.lang_label.setText(self.t("lang_label"))
         self.theme_label.setText(self.t("theme_label"))
@@ -2344,9 +2993,18 @@ class UsageOverlay(QWidget):
         self.usage_order_hint.setText(self.t("usage_order_hint"))
         self.ud_back.setText(self.t("ideas_detail_back"))
         self.ud_hide.setText(self.t("usage_hide"))
+        if hasattr(self, "gd_back"):
+            self.gd_back.setText(self.t("ideas_detail_back"))
+            self.gd_open.setText(self.t("gh_open_web"))
         self._refresh_hidden_row()
         if self._page == "usage_detail":
             self._populate_usage_detail()
+        if self._page == "agents":
+            self._fill_agents()
+        if self._page == "github":
+            self._fill_github()
+        if self._page == "github_detail":
+            self._populate_github_detail()
         self.filter_all.setText(self.t("ideas_all"))
         self.filter_warn.setText(self.t("ideas_warn"))
         self.filter_danger.setText(self.t("ideas_danger"))
@@ -2362,14 +3020,8 @@ class UsageOverlay(QWidget):
         if idx >= 0:
             self.lang_combo.setCurrentIndex(idx)
         self.lang_combo.blockSignals(False)
-        pairs = (
-            (self.home_btn, "usage"),
-            (self.ideas_btn, "ideas"),
-            (self.tips_btn, "tips"),
-            (self.settings_btn, "settings"),
-        )
-        for btn, page in pairs:
-            btn.set_active(self._nav_active(page), force=True)
+        for btn, item in zip(self._nav_btns, NAV_ITEMS):
+            btn.set_active(self._nav_active(item["page"]), force=True)
         for name, btn in self.theme_btns:
             btn.setText(self.t(f"theme_{name}"))
         interval_keys = {5: "interval_5", 30: "interval_30", 60: "interval_60", 300: "interval_300"}
@@ -2394,34 +3046,27 @@ class UsageOverlay(QWidget):
             self.detail_copy.setText(self.t("ideas_detail_copy"))
         if self._page == "idea_detail":
             self._populate_idea_detail()
-        if self._page in ("ideas", "tips") and self._coach is not None:
+        if self._page == "ideas" and self._coach is not None:
             self._fill_ideas()
-            self._fill_tips()
 
     def _nav_active(self, page: str) -> bool:
         if self._page == page:
             return True
-        if page == "usage" and self._page == "usage_detail":
+        if page == "usage" and self._page == "usage_detail" and self._detail_from != "agents":
             return True
-        if self._page != "idea_detail":
-            return False
-        tip = str(getattr(self, "_detail_code", "")).startswith("tip_")
-        if page == "tips":
-            return tip
-        if page == "ideas":
-            return not tip
+        if page == "agents" and self._page == "usage_detail" and self._detail_from == "agents":
+            return True
+        if page == "github" and self._page == "github_detail":
+            return True
+        if self._page == "idea_detail" and page == "ideas":
+            return True
         return False
 
     def _sync_nav(self, *, force: bool = False) -> None:
         if force:
             _NAV_ICON_CACHE.clear()
-        for btn, page in (
-            (self.home_btn, "usage"),
-            (self.ideas_btn, "ideas"),
-            (self.tips_btn, "tips"),
-            (self.settings_btn, "settings"),
-        ):
-            btn.set_active(self._nav_active(page), force=force)
+        for btn, item in zip(self._nav_btns, NAV_ITEMS):
+            btn.set_active(self._nav_active(item["page"]), force=force)
 
     def _set_filter(self, name: str) -> None:
         self._idea_filter = name
@@ -2716,9 +3361,12 @@ class UsageOverlay(QWidget):
 
     def _provider_context_menu(self, name: str, global_pos: QPoint) -> None:
         menu = QMenu(self)
+        detail_act = menu.addAction(self.t("agent_detail_menu"))
         hide_act = menu.addAction(self.t("usage_hide_menu"))
         chosen = menu.exec(global_pos)
-        if chosen is hide_act:
+        if chosen is detail_act:
+            self._open_usage_detail(name, from_page="usage")
+        elif chosen is hide_act:
             self._hide_provider(name)
 
     def set_warn_pct(self, pct: int) -> None:
@@ -2766,7 +3414,13 @@ class UsageOverlay(QWidget):
         if self._snap:
             self._apply(self._snap)
 
-    def _open_usage_detail(self, name: str) -> None:
+    def _usage_detail_back(self) -> None:
+        page = self._detail_from if self._detail_from in ("usage", "agents") else "usage"
+        self._detail_from = "usage"
+        self.goto(page)
+
+    def _open_usage_detail(self, name: str, *, from_page: str = "usage") -> None:
+        self._detail_from = from_page if from_page in ("usage", "agents") else "usage"
         self._detail_provider = name
         self._populate_usage_detail()
         self.goto("usage_detail")
@@ -2781,15 +3435,25 @@ class UsageOverlay(QWidget):
             widget = item.widget()
             if widget:
                 widget.deleteLater()
+        title = _display_name(name) if name else self.t("no_data")
+        self.ud_title.setText(title)
         if not provider:
-            self.ud_title.setText(self.t("no_data"))
             self.ud_plan.hide()
             self.ud_reset.hide()
             self.ud_model.hide()
             self.ud_usage.hide()
             self.ud_error.hide()
+            if name:
+                story = build_agent_story(name, allow_chat=bool(self._chat_analysis))
+                self._append_agent_advice(name, provider, story=story)
+                self._append_agent_story(name, story=story)
+                self._append_agent_kit(name)
+            else:
+                empty = QLabel(self.t("no_data"))
+                empty.setObjectName("meterMeta")
+                self.ud_body.addWidget(empty)
+            self.ud_body.addStretch(1)
             return
-        self.ud_title.setText(_display_name(provider.name))
         plan_text = self.tx(provider.plan) or ""
         self.ud_plan.setText(plan_text)
         self.ud_plan.setVisible(bool(plan_text))
@@ -2815,16 +3479,145 @@ class UsageOverlay(QWidget):
             empty = QLabel(self.t("no_data"))
             empty.setObjectName("meterMeta")
             self.ud_body.addWidget(empty)
+        story = build_agent_story(name or provider.name, allow_chat=bool(self._chat_analysis))
+        self._append_agent_advice(name or provider.name, provider, story=story)
+        self._append_agent_story(name or provider.name, story=story)
+        self._append_agent_kit(name or provider.name)
         self.ud_body.addStretch(1)
 
+    def _append_agent_advice(
+        self,
+        name: str,
+        provider: ProviderUsage | None = None,
+        *,
+        story=None,
+    ) -> None:
+        if not self._quota_access and provider is None:
+            return
+        p = provider or ProviderUsage(name=name)
+        if story is None and self._chat_analysis:
+            story = build_agent_story(name, allow_chat=True)
+        kit = _kit_for_provider(name)
+        advice = build_agent_advice(
+            p,
+            warn_pct=float(self._warn_pct),
+            crit_pct=float(self._crit_pct),
+            story=story,
+            kit=kit,
+        )
+        body_lines: list[str] = []
+        for line in advice.lines:
+            try:
+                body_lines.append(self.t(line.key).format(**line.args))
+            except (KeyError, ValueError):
+                continue
+        if not body_lines:
+            return
+        head = QLabel(self.t("tips_title"))
+        head.setObjectName("pageTitle")
+        self.ud_body.addWidget(head)
+        status = QLabel(self.t(advice.status_key))
+        status.setObjectName("ideaFix")
+        self.ud_body.addWidget(status)
+        body = QLabel("\n".join(f"• {x}" for x in body_lines))
+        body.setObjectName("ideaBody")
+        body.setWordWrap(True)
+        self.ud_body.addWidget(body)
+
+    def _append_agent_story(self, name: str, *, story=None) -> None:
+        if story is None:
+            story = build_agent_story(name, allow_chat=bool(self._chat_analysis))
+        head = QLabel(self.t("agent_story_title").format(name=_display_name(name)))
+        head.setObjectName("pageTitle")
+        self.ud_body.addWidget(head)
+        lines: list[str] = []
+        if story.first_seen:
+            lines.append(self.t("agent_story_first").format(date=story.first_seen))
+        if story.note == "need_chat":
+            lines.append(self.t("agent_story_need_chat"))
+        elif story.note == "empty_data" and not story.sessions:
+            lines.append(self.t("agent_story_empty"))
+        else:
+            if story.sessions:
+                lines.append(self.t("agent_story_sessions").format(n=story.sessions))
+            if story.user_msgs:
+                lines.append(self.t("agent_story_msgs").format(n=story.user_msgs))
+            if story.tool_calls:
+                lines.append(self.t("agent_story_tools").format(n=story.tool_calls))
+            if story.approx_tokens:
+                lines.append(self.t("agent_story_tokens").format(n=f"{story.approx_tokens:,}".replace(",", ".")))
+            if story.per_week:
+                lines.append(self.t("agent_story_freq").format(n=story.per_week))
+            if story.days_active:
+                lines.append(self.t("agent_story_days").format(n=story.days_active))
+            if story.top_tools:
+                tools = ", ".join(f"{n}×{c}" for n, c in story.top_tools[:5])
+                lines.append(self.t("agent_story_tools").format(n=tools))
+            if story.recent:
+                lines.append(self.t("agent_story_recent") + ": " + " · ".join(story.recent[:5]))
+            if story.note == "truncated":
+                lines.append(self.t("agent_story_trunc"))
+        body = QLabel("\n".join(lines) if lines else self.t("agent_story_empty"))
+        body.setObjectName("ideaBody")
+        body.setWordWrap(True)
+        self.ud_body.addWidget(body)
+
+    def _append_agent_kit(self, name: str) -> None:
+        kit = _kit_for_provider(name)
+        if kit is None or not kit.addons:
+            return
+        kind_label = {
+            "rule": self.t("agents_kind_rule"),
+            "extension": self.t("agents_kind_ext"),
+            "skill": self.t("agents_kind_skill"),
+            "mcp": self.t("agents_kind_mcp"),
+            "plugin": self.t("agents_kind_plugin"),
+        }
+        head = QLabel(self.t("agents_kit_title"))
+        head.setObjectName("pageTitle")
+        self.ud_body.addWidget(head)
+        for kind in ("rule", "extension", "plugin", "skill", "mcp"):
+            items = kit.by_kind(kind)
+            if not items:
+                continue
+            sub = QLabel(kind_label.get(kind, kind))
+            sub.setObjectName("ideaFix")
+            self.ud_body.addWidget(sub)
+            lines = []
+            for a in items[:16]:
+                bit = a.name + (f" ({a.detail})" if a.detail else "")
+                lines.append(f"• {bit}")
+            if len(items) > 16:
+                lines.append(f"• … +{len(items) - 16}")
+            body = QLabel("\n".join(lines))
+            body.setObjectName("ideaBody")
+            body.setWordWrap(True)
+            self.ud_body.addWidget(body)
+        note = QLabel(self.t("agents_readonly"))
+        note.setObjectName("meterMeta")
+        note.setWordWrap(True)
+        self.ud_body.addWidget(note)
+
     def _want_favicon(self, name: str, mark: QLabel) -> None:
-        domain = DOMAINS.get(name.upper())
-        if not domain or _pix_from_cache(name, _PROVIDER_ICON_PX):
+        # Offline only: cache / exe / local package icons / brand mark (no network).
+        if _pix_from_cache(name, _PROVIDER_ICON_PX):
             return
-        exe = _exe_for(name)
-        if exe and (pix := _pix_from_exe(exe, _PROVIDER_ICON_PX)):
+        for path in _icon_files(name):
+            pix = _pix_from_file(path, _PROVIDER_ICON_PX)
+            if pix is None:
+                continue
             mark.setPixmap(pix)
+            _ICON_MEM[f"{name}:{_PROVIDER_ICON_PX}"] = pix
+            dest = _cache_root() / "icons" / f"{name.lower().replace(' ', '_')}.png"
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                pix.save(str(dest), "PNG")
+            except OSError:
+                pass
             return
+        brand = _brand_pix(name, _PROVIDER_ICON_PX)
+        mark.setPixmap(brand)
+        _ICON_MEM[f"{name}:{_PROVIDER_ICON_PX}"] = brand
 
     def _got_icon(self, name: str, data: bytes, mark: QLabel) -> None:
         pix = QPixmap()
@@ -2927,57 +3720,343 @@ class UsageOverlay(QWidget):
                 )
         self.ideas_layout.addStretch(1)
 
-    def _fill_tips(self) -> None:
-        while self.tips_layout.count():
-            item = self.tips_layout.takeAt(0)
+    def _user_agent_set(self) -> set[str]:
+        names = [p.name for p in (self._snap.providers if self._snap else [])]
+        return agents_from_providers(names) | detect_local_agents()
+
+    def _fill_github(self) -> None:
+        while self.github_layout.count():
+            item = self.github_layout.takeAt(0)
             widget = item.widget()
             if widget:
                 widget.deleteLater()
-        report = self._coach
-        if not self._chat_analysis:
-            self.tips_layout.addWidget(self._idea_label(self.t("ideas_need_chat"), "ideaBody"))
-            self.tips_layout.addStretch(1)
+        if not self._gh_projects:
+            from github_live import projects_instant
+
+            self._gh_projects = projects_instant()
+            self._start_gh_fetch(force=True)
+        self._append_weekly_projects(self.github_layout)
+        self.github_layout.addStretch(1)
+        self._start_gh_localize()
+
+    def _gh_desc(self, proj: LiveProject) -> str:
+        key = (proj.repo, self._lang)
+        if key in self._gh_i18n:
+            return self._gh_i18n[key]
+        return (proj.description or "").strip()
+
+    def _start_gh_localize(self) -> None:
+        if self._for_test:
             return
-        if report is None:
-            self.tips_layout.addWidget(self._idea_label(self.t("ideas_wait"), "ideaBody"))
-            self.tips_layout.addStretch(1)
+        from auto_translate import normalize_lang
+
+        if normalize_lang(self._lang) == "en":
             return
-        if report.error:
-            self.tips_layout.addWidget(self._idea_label(self.tx(report.error), "error"))
-            self.tips_layout.addStretch(1)
+        fits = ranked_live(self._gh_projects, cat=self._github_cat)
+        pairs: list[tuple[str, str]] = []
+        for proj in fits:
+            raw = (proj.description or "").strip()
+            if not raw:
+                continue
+            if (proj.repo, self._lang) in self._gh_i18n:
+                continue
+            pairs.append((proj.repo, raw))
+        if not pairs:
             return
-        tips = report.tips
-        if not tips:
-            self.tips_layout.addWidget(self._idea_label(self.t("ideas_none"), "ideaBody"))
-            self.tips_layout.addStretch(1)
+        if self._gh_loc_worker and self._gh_loc_worker.isRunning():
+            self._gh_loc_worker.requestInterruption()
+        self._gh_loc_worker = GhLocalizeWorker(pairs[:40], self._lang, parent=self)
+        self._gh_loc_worker.finished_ok.connect(self._apply_gh_localize)
+        self._gh_loc_worker.start()
+
+    def _apply_gh_localize(self, lang: str, mapping: object) -> None:
+        if self._quitting or lang != self._lang:
             return
-        self.tips_layout.addWidget(self._idea_label(self.t("tips_title"), "pageTitle"))
-        self.tips_layout.addWidget(self._idea_label(self.t("tips_hint"), "ideaBody"))
-        for tip in tips:
-            helpers = tip.helpers
-            title = self.t(f"{tip.code}_p")
-            if tip.code in ("tip_mcp", "tip_skill") and tip.detail:
-                title = self.t(f"{tip.code}_p").format(name=tip.detail)
-            fix = self.t(f"{tip.code}_f")
-            if tip.code in ("tip_mcp", "tip_skill") and tip.detail:
-                fix = self.t(f"{tip.code}_f").format(name=tip.detail)
-            elif tip.code == "tip_path" and helpers:
-                fix = self.t("tip_path_f").format(tools=", ".join(helpers[:3]))
-            self.tips_layout.addWidget(
-                self._idea_card(
-                    "info",
-                    self.t("tips_card_source"),
-                    "",
-                    tip.detail or ", ".join(helpers) or self.t("tips_card_source"),
-                    title,
-                    f"{self.t('ideas_fix')}: {fix}",
-                    code=tip.code,
-                    helpers=helpers,
-                    count=1,
-                    title_text=self.t("tips_card_title"),
-                )
+        if not isinstance(mapping, dict):
+            return
+        for repo, text in mapping.items():
+            if isinstance(repo, str) and isinstance(text, str) and text:
+                self._gh_i18n[(repo, lang)] = text
+        if self._page == "github":
+            self._fill_github_list_only()
+        elif self._page == "github_detail" and self._gh_detail_repo:
+            self._populate_github_detail()
+
+    def _start_gh_fetch(self, *, force: bool = False) -> None:
+        if self._for_test:
+            return
+        if self._gh_worker and self._gh_worker.isRunning():
+            return
+        self._gh_worker = GhFetchWorker(force=force, parent=self)
+        self._gh_worker.finished_ok.connect(self._apply_gh_projects)
+        self._gh_worker.failed.connect(lambda _m: None)
+        self._gh_worker.start()
+
+    def _apply_gh_projects(self, projects: object) -> None:
+        if self._quitting:
+            return
+        if not isinstance(projects, list) or not projects:
+            return
+        self._gh_projects = list(projects)
+        if self._page == "github":
+            self._fill_github_list_only()
+            self._start_gh_localize()
+        elif self._page == "github_detail" and self._gh_detail_repo:
+            self._populate_github_detail()
+
+    def _fill_github_list_only(self) -> None:
+        while self.github_layout.count():
+            item = self.github_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        self._append_weekly_projects(self.github_layout)
+        self.github_layout.addStretch(1)
+
+    def _set_github_cat(self, cat: str) -> None:
+        self._github_cat = cat if cat in ("all", *CAT_ORDER) else "all"
+        if self._page == "github":
+            self._fill_github_list_only()
+            self._start_gh_localize()
+
+    def _open_github_detail(self, repo: str) -> None:
+        self._gh_detail_repo = repo
+        self._populate_github_detail()
+        self.goto("github_detail")
+
+    def _open_github_web(self) -> None:
+        proj = get_project(self._gh_projects, self._gh_detail_repo or "")
+        if proj is None:
+            return
+        QDesktopServices.openUrl(QUrl(proj.url))
+
+    def _populate_github_detail(self) -> None:
+        while self.gd_body.count():
+            item = self.gd_body.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        proj = get_project(self._gh_projects, self._gh_detail_repo or "")
+        if proj is None:
+            self.gd_title.setText(self.t("no_data"))
+            self.gd_meta.setText("")
+            return
+        from dataclasses import replace
+
+        desc = self._gh_desc(proj)
+        if not self._for_test and (proj.description or "").strip():
+            # Detay açılınca anında çevir (önbellek varsa hızlı)
+            desc = localize_blurb(proj.description, self._lang)
+            self._gh_i18n[(proj.repo, self._lang)] = desc
+        guide = localize_guide(
+            build_guide(replace(proj, description=desc), lang=self._lang),
+            self._lang,
+        )
+        cat_key = {
+            "mcp": "weekly_cat_mcp",
+            "ide": "weekly_cat_ide",
+            "cli": "weekly_cat_cli",
+            "rules": "weekly_cat_rules",
+            "tools": "weekly_cat_tools",
+            "learn": "weekly_cat_learn",
+        }
+        src_key = {
+            "live": "gh_source_live",
+            "cache": "gh_source_cache",
+            "fallback": "gh_source_fallback",
+        }.get(proj.source, "gh_source_fallback")
+        self.gd_title.setText(f"#{proj.rank}  {proj.title}")
+        meta_bits = [
+            proj.repo,
+            self.t(cat_key.get(proj.cat, "weekly_cat_tools")),
+            self.t("gh_stars").format(n=f"{proj.stars:,}".replace(",", ".")),
+        ]
+        if proj.language:
+            meta_bits.append(proj.language)
+        meta_bits.append(self.t(src_key))
+        self.gd_meta.setText(" · ".join(meta_bits))
+
+        def section(title_key: str, body: str, mono: bool = False) -> None:
+            if not (body or "").strip():
+                return
+            h = QLabel(self.t(title_key))
+            h.setObjectName("settingTitle")
+            self.gd_body.addWidget(h)
+            b = QLabel(body)
+            b.setObjectName("ghCode" if mono else "ideaBody")
+            b.setWordWrap(True)
+            b.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            self.gd_body.addWidget(b)
+
+        section("gh_detail_what", guide.what)
+        section("gh_detail_adv", "\n".join(f"• {a}" for a in guide.advantages))
+        section("gh_detail_download", guide.download, mono=True)
+        section("gh_detail_terminal", guide.terminal, mono=True)
+        section("gh_detail_mcp", guide.mcp, mono=True)
+        if guide.extras:
+            section("gh_detail_extra", guide.extras)
+        note = QLabel(self.t("gh_open_hint"))
+        note.setObjectName("meterMeta")
+        note.setWordWrap(True)
+        self.gd_body.addWidget(note)
+        self.gd_body.addStretch(1)
+
+    def _append_weekly_projects(self, layout: QVBoxLayout | None = None) -> None:
+        layout = layout if layout is not None else self.github_layout
+        layout.setSpacing(6)
+        layout.addWidget(self._idea_label(self.t("weekly_title"), "pageTitle"))
+        layout.addWidget(self._idea_label(self.t("weekly_hint"), "ideaBody"))
+
+        filt = QFrame()
+        filt.setObjectName("ghFilterBar")
+        filt_g = QGridLayout(filt)
+        filt_g.setContentsMargins(6, 6, 6, 6)
+        filt_g.setHorizontalSpacing(4)
+        filt_g.setVerticalSpacing(4)
+        self._gh_filter_btns = []
+        cat_labels = {
+            "all": self.t("weekly_cat_all"),
+            "mcp": self.t("weekly_cat_mcp"),
+            "ide": self.t("weekly_cat_ide"),
+            "cli": self.t("weekly_cat_cli"),
+            "rules": self.t("weekly_cat_rules"),
+            "tools": self.t("weekly_cat_tools"),
+            "learn": self.t("weekly_cat_learn"),
+        }
+        keys = ("all", *CAT_ORDER)
+        cols = 4
+        for i, key in enumerate(keys):
+            btn = QPushButton(cat_labels[key])
+            btn.setObjectName("segBtn")
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setMinimumHeight(28)
+            btn.clicked.connect(lambda *, c=key: self._set_github_cat(c))
+            self._style_seg_btn(btn, self._github_cat == key)
+            filt_g.addWidget(btn, i // cols, i % cols)
+            self._gh_filter_btns.append((key, btn))
+        layout.addWidget(filt)
+
+        fits = ranked_live(self._gh_projects, cat=self._github_cat)
+        cat_key = {
+            "mcp": "weekly_cat_mcp",
+            "ide": "weekly_cat_ide",
+            "cli": "weekly_cat_cli",
+            "rules": "weekly_cat_rules",
+            "tools": "weekly_cat_tools",
+            "learn": "weekly_cat_learn",
+        }
+        if not fits:
+            layout.addWidget(self._idea_label(self.t("gh_loading"), "ideaBody"))
+            return
+        if self._github_cat == "all":
+            head = self.t("weekly_top_heading").format(n=len(fits))
+        else:
+            head = self.t("weekly_cat_heading").format(
+                cat=self.t(cat_key.get(self._github_cat, "weekly_cat_tools")),
+                n=len(fits),
             )
-        self.tips_layout.addStretch(1)
+        src = fits[0].source if fits else "fallback"
+        src_key = {
+            "live": "gh_source_live",
+            "cache": "gh_source_cache",
+            "fallback": "gh_source_fallback",
+        }.get(src, "gh_source_fallback")
+        layout.addWidget(self._idea_label(f"{head} · {self.t(src_key)}", "ghCat"))
+
+        for proj in fits:
+            tile = _ClickFrame()
+            tile.setObjectName("ghTile")
+            tile.setCursor(Qt.PointingHandCursor)
+            tile.setMinimumHeight(64)
+            row = QHBoxLayout(tile)
+            row.setContentsMargins(10, 8, 10, 8)
+            row.setSpacing(10)
+
+            rank = QLabel(str(proj.rank or 0))
+            rank.setObjectName("ghRank")
+            rank.setFixedSize(36, 36)
+            rank.setAlignment(Qt.AlignCenter)
+
+            mid = QVBoxLayout()
+            mid.setSpacing(2)
+            mid.setContentsMargins(0, 0, 0, 0)
+            title = QLabel(proj.title)
+            title.setObjectName("ghTileTitle")
+            title.setWordWrap(True)
+            repo = QLabel(proj.repo)
+            repo.setObjectName("ghTileRepo")
+            blurb = QLabel(self._gh_desc(proj) or self.t("gh_no_desc"))
+            blurb.setObjectName("ghTileBody")
+            blurb.setWordWrap(True)
+            blurb.setMaximumHeight(34)
+            mid.addWidget(title)
+            mid.addWidget(repo)
+            mid.addWidget(blurb)
+
+            right = QVBoxLayout()
+            right.setSpacing(4)
+            right.setContentsMargins(0, 0, 0, 0)
+            cat_lbl = QLabel(self.t(cat_key.get(proj.cat, "weekly_cat_tools")))
+            cat_lbl.setObjectName("ghCatChip")
+            cat_lbl.setAlignment(Qt.AlignCenter)
+            stars = f"{proj.stars:,}".replace(",", ".") if proj.stars else "—"
+            star_lbl = QLabel(self.t("gh_stars").format(n=stars))
+            star_lbl.setObjectName("ghFitChip")
+            star_lbl.setAlignment(Qt.AlignCenter)
+            right.addWidget(cat_lbl, 0, Qt.AlignRight)
+            right.addWidget(star_lbl, 0, Qt.AlignRight)
+            right.addStretch(1)
+
+            row.addWidget(rank, 0, Qt.AlignTop)
+            row.addLayout(mid, 1)
+            row.addLayout(right, 0)
+            repo_key = proj.repo
+            tile.clicked.connect(lambda *, r=repo_key: self._open_github_detail(r))
+            layout.addWidget(tile)
+
+    def _fill_agents(self) -> None:
+        while self.agents_layout.count():
+            item = self.agents_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        self.agents_layout.addWidget(self._idea_label(self.t("agents_title"), "pageTitle"))
+        self.agents_layout.addWidget(self._idea_label(self.t("agents_hint"), "ideaBody"))
+        names = _agent_logo_names(self._snap.providers if self._snap else [])
+        if not names:
+            self.agents_layout.addWidget(self._idea_label(self.t("agents_empty"), "ideaBody"))
+            self.agents_layout.addStretch(1)
+            return
+        grid_host = QWidget()
+        grid = QGridLayout(grid_host)
+        grid.setContentsMargins(4, 8, 4, 8)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(14)
+        cols = 3
+        logo_px = 56
+        for i, name in enumerate(names):
+            cell = QWidget()
+            cell.setCursor(Qt.PointingHandCursor)
+            cell_l = QVBoxLayout(cell)
+            cell_l.setContentsMargins(2, 2, 2, 2)
+            cell_l.setSpacing(6)
+            btn = QPushButton()
+            btn.setObjectName("agentLogoBtn")
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setFixedSize(logo_px + 8, logo_px + 8)
+            btn.setIcon(QIcon(_round_provider_pix(name, logo_px)))
+            btn.setIconSize(QSize(logo_px, logo_px))
+            btn.setFlat(True)
+            btn.clicked.connect(lambda *, n=name: self._open_usage_detail(n, from_page="agents"))
+            label = QLabel(_display_name(name))
+            label.setObjectName("agentLogoName")
+            label.setAlignment(Qt.AlignHCenter)
+            label.setWordWrap(True)
+            cell_l.addWidget(btn, 0, Qt.AlignHCenter)
+            cell_l.addWidget(label)
+            grid.addWidget(cell, i // cols, i % cols)
+        self.agents_layout.addWidget(grid_host)
+        self.agents_layout.addStretch(1)
 
     def _idea_label(self, text: str, name: str) -> QLabel:
         label = QLabel(text)
@@ -3143,6 +4222,7 @@ class UsageOverlay(QWidget):
             lambda *, c=code, s=snippet, src=source, w=when, h=helpers or [], n=count:
             self._show_idea_detail(c, s, src, w, h, count=n)
         )
+        look.setVisible(bool(code))
         foot.addWidget(look)
         box.addLayout(foot)
         outer.addWidget(icon, 0, Qt.AlignTop)
@@ -3193,21 +4273,23 @@ class UsageOverlay(QWidget):
         self.resize(380, min(640, screen.height() - 48))
 
     def _idea_detail_back(self) -> None:
-        if str(getattr(self, "_detail_code", "")).startswith("tip_"):
-            self.goto("tips")
-        else:
-            self.goto("ideas")
+        self.goto("ideas")
 
     def goto(self, page: str) -> None:
         self._page = page
         self._show_page()
-        if page in ("ideas", "tips"):
+        if page == "ideas":
             if self._chat_analysis:
                 self._start_coach()
             else:
                 self._coach = None
                 self._fill_ideas()
-                self._fill_tips()
+        elif page == "agents":
+            self._fill_agents()
+        elif page == "github":
+            self._fill_github()
+        elif page == "github_detail":
+            self._populate_github_detail()
         elif page == "usage_detail":
             self._populate_usage_detail()
 
@@ -3216,10 +4298,12 @@ class UsageOverlay(QWidget):
             {
                 "usage": 0,
                 "ideas": 1,
-                "tips": 2,
-                "idea_detail": 3,
-                "usage_detail": 4,
-                "settings": 5,
+                "agents": 2,
+                "github": 3,
+                "github_detail": 4,
+                "idea_detail": 5,
+                "usage_detail": 6,
+                "settings": 7,
             }[self._page]
         )
         self._sync_nav()
@@ -3385,13 +4469,12 @@ class UsageOverlay(QWidget):
     def _chat_changed(self, on: bool) -> None:
         self._chat_analysis = on
         self._settings.setValue("chat_analysis", on)
-        if self._page in ("ideas", "tips"):
+        if self._page == "ideas":
             if on:
                 self._start_coach()
             else:
                 self._coach = None
                 self._fill_ideas()
-                self._fill_tips()
 
     def hide_to_tray(self) -> None:
         self.setVisible(False)
@@ -3410,7 +4493,7 @@ class UsageOverlay(QWidget):
 
     def request_close(self) -> None:
         self._quitting = True
-        for w in (self._worker, self._coach_worker, *self._fav_workers):
+        for w in (self._worker, self._coach_worker, self._gh_worker, self._gh_loc_worker, *self._fav_workers):
             if w and w.isRunning():
                 w.requestInterruption()
                 w.wait(800)
@@ -3554,13 +4637,11 @@ class UsageOverlay(QWidget):
         if not self._chat_analysis:
             self._coach = None
             self._fill_ideas()
-            self._fill_tips()
             return
         if self._coach_worker and self._coach_worker.isRunning():
             return
         self._coach = None
         self._fill_ideas()
-        self._fill_tips()
         self._coach_worker = CoachWorker(allow_chat=True, parent=self)
         self._coach_worker.finished_ok.connect(self._apply_coach)
         self._coach_worker.failed.connect(self._fail_coach)
@@ -3571,12 +4652,10 @@ class UsageOverlay(QWidget):
             return
         self._coach = report
         self._fill_ideas()
-        self._fill_tips()
 
     def _fail_coach(self, message: str) -> None:
         self._coach = CoachReport(chats=0, chars=0, tools=0, error="error.generic")
         self._fill_ideas()
-        self._fill_tips()
 
     def _fail(self, message: str) -> None:
         key = message if isinstance(message, str) and message.startswith("error.") else "error.generic"

@@ -4,9 +4,9 @@ Token Tracker — Yazılım Kullanım Lisansı (Taslak)
 
 Yazılım: Token Tracker
 
-Sürüm: 0.1.4
+Sürüm: 0.1.5
 
-Yürürlük / yayın tarihi: 05.09.2026
+Yürürlük / yayın tarihi: 07.09.2026
 
 Hak sahibi / yayıncı: Token Tracker
 

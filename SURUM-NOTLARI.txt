@@ -1,18 +1,29 @@
-Token Tracker 0.1.4 (Windows 64-bit)
-=====================================
+Token Tracker 0.1.5 (Windows 64-bit)
+====================================
 
-Yenilikler
+WHAT'S NEW
 ----------
-- Canli yenileme (5 sn) + surum yaninda durum noktasi
-- Token dusurme ipuclari ayri sayfada
-- Kartlari surukle-birak sirala; sag tik ile gizle
-- Yuzde ondalik basamak secimi (X.YYYY, max 20 karakter)
-- Dususu gosterim: (-n) ve tray en dusuk kalan
+- Redesigned floating pill navigation with theme-aware colors and smooth transitions
+- New Agents page with automatic local agent discovery and detailed agent profiles
+- Agent-specific usage advice inside each agent profile
+- GitHub Top 100 browser with categories, live data, caching, and in-app project details
+- Automatic translation of GitHub descriptions into the selected interface language
+- Expanded language support and improved localized interface text
+- Improved quota cards, navigation responsiveness, icon sizing, and visual consistency
 
-Kurulum
+INSTALLATION
+------------
+1. Extract TokenTracker-0.1.5-win64.zip.
+2. Keep TokenTracker.exe and the _internal folder together.
+3. Run TokenTracker.exe.
+
+PRIVACY
 -------
-1. TokenTracker-0.1.4-win64.zip dosyasini acin
-2. Tum klasoru (TokenTracker.exe + _internal) ayni yere cikartin
-3. TokenTracker.exe calistirin
+- No developer telemetry server
+- Quota checks use local sessions and each provider's official API
+- Chat analysis remains on your computer
+- GitHub translation contacts Google Translate only for public repository descriptions
 
-Iletisim: keseryazilim@gmail.com
+CONTACT
+-------
+keseryazilim@gmail.com

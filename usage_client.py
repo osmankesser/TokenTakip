@@ -699,7 +699,16 @@ def _installed(name: str, detail: str) -> ProviderUsage:
 
 def _folder_names() -> list[str]:
     names: list[str] = []
-    for folder in program_roots():
+    roots = list(program_roots())
+    roots.extend(
+        [
+            _home(),
+            _local(),
+            _roaming(),
+            _local("Programs"),
+        ]
+    )
+    for folder in roots:
         try:
             if folder.exists():
                 names.extend(item.name.lower() for item in folder.iterdir())
@@ -714,10 +723,17 @@ _SCAN_MAP = (
     ("TABNINE", ("tabnine",), lambda: _installed("TABNINE", "detail.tabnine")),
     ("AMAZON Q", ("amazon q", "amazonq", "codewhisperer"), lambda: _installed("AMAZON Q", "detail.amazon_q")),
     ("JETBRAINS AI", ("jetbrains",), lambda: _installed("JETBRAINS AI", "detail.jetbrains")),
-    ("AIDER", ("aider",), lambda: _installed("AIDER", "detail.aider")),
+    ("AIDER", ("aider", ".aider"), lambda: _installed("AIDER", "detail.aider")),
     ("GROQ", ("groq",), lambda: _installed("GROQ", "detail.groq")),
     ("QWEN", ("qwen",), lambda: _installed("QWEN", "detail.qwen")),
     ("CLINE", ("cline",), lambda: _installed("CLINE", "detail.cline")),
+    ("MANUS", ("manus", ".manus"), lambda: _installed("MANUS", "detail.installed")),
+    ("WINDSURF", ("windsurf",), lambda: _installed("WINDSURF", "detail.installed")),
+    ("TRAE", ("trae",), lambda: _installed("TRAE", "detail.trae")),
+    ("CONTINUE", ("continue", ".continue"), lambda: _installed("CONTINUE", "detail.continue")),
+    ("CODEIUM", ("codeium",), lambda: _installed("CODEIUM", "detail.installed")),
+    ("KIRO", ("kiro",), lambda: _installed("KIRO", "detail.installed")),
+    ("WARP", ("warp",), lambda: _installed("WARP", "detail.installed")),
 )
 
 
@@ -1010,6 +1026,9 @@ def _detect_claude() -> bool:
         _home(".claude"),
         _local("AnthropicClaude"),
         _local("Programs", "Claude"),
+        _local("Claude"),
+        _local("Claude-Data"),
+        _local("Claude-3p"),
         _roaming("Claude"),
     ) or _cmd_exists("claude")
 
