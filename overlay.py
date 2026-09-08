@@ -64,11 +64,13 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFrame,
     QGraphicsDropShadowEffect,
     QGraphicsOpacityEffect,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMenu,
     QMessageBox,
@@ -87,7 +89,6 @@ if str(ROOT) not in sys.path:
 
 from lang_packs import TEXTS, validate_langs  # noqa: E402
 from prompt_coach import CoachReport, Finding, PATHY, build_report  # noqa: E402
-from agent_advice import build_agent_advice  # noqa: E402
 from agent_catalog import discover_agent_kits  # noqa: E402
 from agent_story import build_agent_story  # noqa: E402
 from github_live import (  # noqa: E402
@@ -98,6 +99,17 @@ from github_live import (  # noqa: E402
     localize_blurb,
     localize_guide,
     ranked_live,
+)
+from project_installer import (  # noqa: E402
+    InstallError,
+    InstallPreflight,
+    agent_argv,
+    agent_prompt,
+    launch_agent_install,
+    launch_terminal_install,
+    probe_repo,
+    resolve_clone_target,
+    terminal_plan,
 )
 from weekly_projects import (  # noqa: E402
     CAT_ORDER,
@@ -1068,15 +1080,6 @@ _KIT_PROVIDER = {
 }
 
 
-def _kit_for_provider(name: str):
-    key = name.upper()
-    for kit in discover_agent_kits():
-        mapped = _KIT_PROVIDER.get(kit.agent, kit.agent.upper())
-        if mapped == key or kit.agent.upper() == key:
-            return kit
-    return None
-
-
 def _agent_logo_names(providers) -> list[str]:
     """Kota listesi + yerel kit ajanları — logo ızgarası sırası."""
     names: list[str] = []
@@ -1304,6 +1307,20 @@ QFrame#ghTile:hover {{
 QLabel#ghTileTitle {{
     color: {p["title"]}; font-size: 12px; font-weight: 800;
 }}
+QLabel#ghPriceChip {{
+    color: {p["muted"]}; background: {p["segment"]};
+    border: 1px solid {p["line"]}; border-radius: 7px;
+    padding: 1px 5px; font-size: 8px; font-weight: 800;
+}}
+QLabel#ghPriceChip[tier="free"] {{
+    color: {p["success"]}; background: {p["success_soft"]}; border-color: {p["success"]};
+}}
+QLabel#ghPriceChip[tier="partial"] {{
+    color: {p["text"]}; background: {p["idea_warn_bg"]}; border-color: {p["idea_warn_border"]};
+}}
+QLabel#ghPriceChip[tier="paid"] {{
+    color: {p["error"]}; background: {p["idea_danger_bg"]}; border-color: {p["idea_danger_border"]};
+}}
 QLabel#ghTileRepo {{
     color: {p["faint"]}; font-size: 9px; font-weight: 600;
 }}
@@ -1434,6 +1451,20 @@ QFrame#ghTile:hover {
 }
 QLabel#ghTileTitle {
     color: #0f172a; font-size: 12px; font-weight: 800;
+}
+QLabel#ghPriceChip {
+    color: #64748b; background: #e2e8f0;
+    border: 1px solid #cbd5e1; border-radius: 7px;
+    padding: 1px 5px; font-size: 8px; font-weight: 800;
+}
+QLabel#ghPriceChip[tier="free"] {
+    color: #047857; background: #d1fae5; border-color: #047857;
+}
+QLabel#ghPriceChip[tier="partial"] {
+    color: #334155; background: #fffbeb; border-color: #fde68a;
+}
+QLabel#ghPriceChip[tier="paid"] {
+    color: #b91c1c; background: #fef2f2; border-color: #fecaca;
 }
 QLabel#ghTileRepo {
     color: #94a3b8; font-size: 9px; font-weight: 600;
@@ -1609,6 +1640,25 @@ class GhLocalizeWorker(QThread):
             self.finished_ok.emit(self._lang, out)
         except Exception:
             self.finished_ok.emit(self._lang, {})
+
+
+class GhInstallProbeWorker(QThread):
+    finished_ok = Signal(str, object)
+    failed = Signal(str, str)
+
+    def __init__(self, repo: str, parent=None):
+        super().__init__(parent)
+        self._repo = repo
+
+    def run(self) -> None:
+        try:
+            if self.isInterruptionRequested():
+                return
+            self.finished_ok.emit(self._repo, probe_repo(self._repo))
+        except InstallError as exc:
+            self.failed.emit(self._repo, exc.code)
+        except Exception:
+            self.failed.emit(self._repo, "install_no_option")
 
 
 _BAR_H = 12
@@ -2082,6 +2132,9 @@ class UsageOverlay(QWidget):
         self._gh_worker: GhFetchWorker | None = None
         self._gh_loc_worker: GhLocalizeWorker | None = None
         self._gh_i18n: dict[tuple[str, str], str] = {}
+        self._install_preflight: InstallPreflight | None = None
+        self._install_probe_error: str | None = None
+        self._install_workers: list[GhInstallProbeWorker] = []
         self._src_filter_btns: list[tuple[str, QPushButton]] = []
         self._quitting = False
         self._restore_pin_after_show = False
@@ -2301,6 +2354,26 @@ class UsageOverlay(QWidget):
         self.gd_meta.setObjectName("ideaSource")
         self.gd_meta.setWordWrap(True)
         gd_l.addWidget(self.gd_meta)
+        self.gd_install_status = QLabel("")
+        self.gd_install_status.setObjectName("meterMeta")
+        self.gd_install_status.setWordWrap(True)
+        self.gd_install_status.hide()
+        gd_l.addWidget(self.gd_install_status)
+        gd_install_row = QHBoxLayout()
+        gd_install_row.addStretch(1)
+        self.gd_install_term = QPushButton(self.t("install_terminal"))
+        self.gd_install_term.setObjectName("lookBtn")
+        self.gd_install_term.setCursor(Qt.PointingHandCursor)
+        self.gd_install_term.clicked.connect(self._install_via_terminal)
+        self.gd_install_term.hide()
+        gd_install_row.addWidget(self.gd_install_term)
+        self.gd_install_agent = QPushButton(self.t("install_agent"))
+        self.gd_install_agent.setObjectName("lookBtn")
+        self.gd_install_agent.setCursor(Qt.PointingHandCursor)
+        self.gd_install_agent.clicked.connect(self._install_via_agent)
+        self.gd_install_agent.hide()
+        gd_install_row.addWidget(self.gd_install_agent)
+        gd_l.addLayout(gd_install_row)
         gd_scroll = QScrollArea()
         gd_scroll.setObjectName("list")
         gd_scroll.setWidgetResizable(True)
@@ -2996,6 +3069,9 @@ class UsageOverlay(QWidget):
         if hasattr(self, "gd_back"):
             self.gd_back.setText(self.t("ideas_detail_back"))
             self.gd_open.setText(self.t("gh_open_web"))
+            self.gd_install_term.setText(self.t("install_terminal"))
+            self.gd_install_agent.setText(self.t("install_agent"))
+            self._refresh_install_action_ui()
         self._refresh_hidden_row()
         if self._page == "usage_detail":
             self._populate_usage_detail()
@@ -3444,10 +3520,7 @@ class UsageOverlay(QWidget):
             self.ud_usage.hide()
             self.ud_error.hide()
             if name:
-                story = build_agent_story(name, allow_chat=bool(self._chat_analysis))
-                self._append_agent_advice(name, provider, story=story)
-                self._append_agent_story(name, story=story)
-                self._append_agent_kit(name)
+                self._append_agent_story(name)
             else:
                 empty = QLabel(self.t("no_data"))
                 empty.setObjectName("meterMeta")
@@ -3479,124 +3552,22 @@ class UsageOverlay(QWidget):
             empty = QLabel(self.t("no_data"))
             empty.setObjectName("meterMeta")
             self.ud_body.addWidget(empty)
-        story = build_agent_story(name or provider.name, allow_chat=bool(self._chat_analysis))
-        self._append_agent_advice(name or provider.name, provider, story=story)
-        self._append_agent_story(name or provider.name, story=story)
-        self._append_agent_kit(name or provider.name)
+        self._append_agent_story(name or provider.name)
         self.ud_body.addStretch(1)
-
-    def _append_agent_advice(
-        self,
-        name: str,
-        provider: ProviderUsage | None = None,
-        *,
-        story=None,
-    ) -> None:
-        if not self._quota_access and provider is None:
-            return
-        p = provider or ProviderUsage(name=name)
-        if story is None and self._chat_analysis:
-            story = build_agent_story(name, allow_chat=True)
-        kit = _kit_for_provider(name)
-        advice = build_agent_advice(
-            p,
-            warn_pct=float(self._warn_pct),
-            crit_pct=float(self._crit_pct),
-            story=story,
-            kit=kit,
-        )
-        body_lines: list[str] = []
-        for line in advice.lines:
-            try:
-                body_lines.append(self.t(line.key).format(**line.args))
-            except (KeyError, ValueError):
-                continue
-        if not body_lines:
-            return
-        head = QLabel(self.t("tips_title"))
-        head.setObjectName("pageTitle")
-        self.ud_body.addWidget(head)
-        status = QLabel(self.t(advice.status_key))
-        status.setObjectName("ideaFix")
-        self.ud_body.addWidget(status)
-        body = QLabel("\n".join(f"• {x}" for x in body_lines))
-        body.setObjectName("ideaBody")
-        body.setWordWrap(True)
-        self.ud_body.addWidget(body)
 
     def _append_agent_story(self, name: str, *, story=None) -> None:
         if story is None:
-            story = build_agent_story(name, allow_chat=bool(self._chat_analysis))
+            story = build_agent_story(name, allow_chat=False)
         head = QLabel(self.t("agent_story_title").format(name=_display_name(name)))
         head.setObjectName("pageTitle")
         self.ud_body.addWidget(head)
-        lines: list[str] = []
-        if story.first_seen:
-            lines.append(self.t("agent_story_first").format(date=story.first_seen))
-        if story.note == "need_chat":
-            lines.append(self.t("agent_story_need_chat"))
-        elif story.note == "empty_data" and not story.sessions:
-            lines.append(self.t("agent_story_empty"))
-        else:
-            if story.sessions:
-                lines.append(self.t("agent_story_sessions").format(n=story.sessions))
-            if story.user_msgs:
-                lines.append(self.t("agent_story_msgs").format(n=story.user_msgs))
-            if story.tool_calls:
-                lines.append(self.t("agent_story_tools").format(n=story.tool_calls))
-            if story.approx_tokens:
-                lines.append(self.t("agent_story_tokens").format(n=f"{story.approx_tokens:,}".replace(",", ".")))
-            if story.per_week:
-                lines.append(self.t("agent_story_freq").format(n=story.per_week))
-            if story.days_active:
-                lines.append(self.t("agent_story_days").format(n=story.days_active))
-            if story.top_tools:
-                tools = ", ".join(f"{n}×{c}" for n, c in story.top_tools[:5])
-                lines.append(self.t("agent_story_tools").format(n=tools))
-            if story.recent:
-                lines.append(self.t("agent_story_recent") + ": " + " · ".join(story.recent[:5]))
-            if story.note == "truncated":
-                lines.append(self.t("agent_story_trunc"))
-        body = QLabel("\n".join(lines) if lines else self.t("agent_story_empty"))
+        text = self.t("agent_story_sessions").format(n=story.sessions)
+        if not story.sessions:
+            text += "\n" + self.t("agent_story_empty")
+        body = QLabel(text)
         body.setObjectName("ideaBody")
         body.setWordWrap(True)
         self.ud_body.addWidget(body)
-
-    def _append_agent_kit(self, name: str) -> None:
-        kit = _kit_for_provider(name)
-        if kit is None or not kit.addons:
-            return
-        kind_label = {
-            "rule": self.t("agents_kind_rule"),
-            "extension": self.t("agents_kind_ext"),
-            "skill": self.t("agents_kind_skill"),
-            "mcp": self.t("agents_kind_mcp"),
-            "plugin": self.t("agents_kind_plugin"),
-        }
-        head = QLabel(self.t("agents_kit_title"))
-        head.setObjectName("pageTitle")
-        self.ud_body.addWidget(head)
-        for kind in ("rule", "extension", "plugin", "skill", "mcp"):
-            items = kit.by_kind(kind)
-            if not items:
-                continue
-            sub = QLabel(kind_label.get(kind, kind))
-            sub.setObjectName("ideaFix")
-            self.ud_body.addWidget(sub)
-            lines = []
-            for a in items[:16]:
-                bit = a.name + (f" ({a.detail})" if a.detail else "")
-                lines.append(f"• {bit}")
-            if len(items) > 16:
-                lines.append(f"• … +{len(items) - 16}")
-            body = QLabel("\n".join(lines))
-            body.setObjectName("ideaBody")
-            body.setWordWrap(True)
-            self.ud_body.addWidget(body)
-        note = QLabel(self.t("agents_readonly"))
-        note.setObjectName("meterMeta")
-        note.setWordWrap(True)
-        self.ud_body.addWidget(note)
 
     def _want_favicon(self, name: str, mark: QLabel) -> None:
         # Offline only: cache / exe / local package icons / brand mark (no network).
@@ -3745,6 +3716,14 @@ class UsageOverlay(QWidget):
             return self._gh_i18n[key]
         return (proj.description or "").strip()
 
+    def _gh_price_text(self, proj: LiveProject) -> str:
+        key = {
+            "free": "gh_price_free",
+            "partial": "gh_price_partial",
+            "paid": "gh_price_paid",
+        }.get(proj.pricing, "gh_price_unknown")
+        return self.t(key)
+
     def _start_gh_localize(self) -> None:
         if self._for_test:
             return
@@ -3819,8 +3798,151 @@ class UsageOverlay(QWidget):
             self._fill_github_list_only()
             self._start_gh_localize()
 
+    def _start_install_probe(self, repo: str) -> None:
+        if self._install_preflight and self._install_preflight.repo == repo:
+            self._refresh_install_action_ui()
+            return
+        if any(w._repo == repo and w.isRunning() for w in self._install_workers):
+            return
+        self._install_preflight = None
+        self._install_probe_error = None
+        self._refresh_install_action_ui()
+        if self._for_test:
+            return
+        worker = GhInstallProbeWorker(repo, parent=self)
+        self._install_workers.append(worker)
+        worker.finished_ok.connect(self._apply_install_probe)
+        worker.failed.connect(self._fail_install_probe)
+        worker.finished.connect(lambda w=worker: self._drop_install_worker(w))
+        worker.start()
+
+    def _drop_install_worker(self, worker: GhInstallProbeWorker) -> None:
+        if worker in self._install_workers:
+            self._install_workers.remove(worker)
+
+    def _apply_install_probe(self, repo: str, result: object) -> None:
+        if self._quitting or repo != self._gh_detail_repo or not isinstance(result, InstallPreflight):
+            return
+        self._install_preflight = result
+        self._install_probe_error = None
+        self._refresh_install_action_ui()
+
+    def _fail_install_probe(self, repo: str, code: str) -> None:
+        if self._quitting or repo != self._gh_detail_repo:
+            return
+        self._install_preflight = None
+        self._install_probe_error = code
+        self._refresh_install_action_ui()
+
+    def _refresh_install_action_ui(self) -> None:
+        if not hasattr(self, "gd_install_status"):
+            return
+        preflight = self._install_preflight
+        current = self._gh_detail_repo
+        ready = preflight is not None and preflight.repo == current
+        self.gd_install_term.setVisible(bool(ready and preflight and preflight.can_terminal))
+        self.gd_install_agent.setVisible(bool(ready and preflight and preflight.can_agent))
+        if self._install_probe_error:
+            text = self.t(self._install_probe_error)
+        elif not ready:
+            text = self.t("install_checking") if current else ""
+        else:
+            text = self.t(preflight.status_key)
+            if preflight.missing_tools:
+                text = text.format(tools=", ".join(preflight.missing_tools))
+        self.gd_install_status.setText(text)
+        self.gd_install_status.setVisible(bool(text))
+
+    def _pick_install_parent(self) -> str:
+        start = QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation)
+        return QFileDialog.getExistingDirectory(self, self.t("install_pick_folder"), start)
+
+    def _show_install_error(self, code: str) -> None:
+        QMessageBox.warning(self, self.t("install_confirm_title"), self.t(code))
+
+    def _confirm_install(self, repo: str, target: Path, commands: str) -> bool:
+        body = self.t("install_confirm_body").format(
+            repo=repo,
+            target=str(target),
+            commands=commands,
+        )
+        return QMessageBox.question(
+            self,
+            self.t("install_confirm_title"),
+            body,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        ) == QMessageBox.Yes
+
+    def _install_via_terminal(self) -> None:
+        preflight = self._install_preflight
+        if not preflight or not preflight.can_terminal:
+            self._show_install_error("install_no_terminal")
+            return
+        parent = self._pick_install_parent()
+        if not parent:
+            return
+        try:
+            target, lines = terminal_plan(preflight, parent)
+            if not self._confirm_install(preflight.repo, target, "\n".join(lines)):
+                return
+            launch_terminal_install(preflight, parent)
+        except InstallError as exc:
+            self._show_install_error(exc.code)
+            return
+        except OSError:
+            self._show_install_error("install_launch_failed")
+            return
+        self.gd_install_status.setText(self.t("install_started"))
+        if not self._for_test:
+            QMessageBox.information(self, self.t("install_confirm_title"), self.t("install_started"))
+
+    def _install_via_agent(self) -> None:
+        preflight = self._install_preflight
+        if not preflight or not preflight.can_agent:
+            self._show_install_error("install_no_option")
+            return
+        agents = preflight.available_agents
+        labels = [a.label for a in agents]
+        label, ok = QInputDialog.getItem(
+            self,
+            self.t("install_pick_agent"),
+            self.t("install_pick_agent"),
+            labels,
+            0,
+            False,
+        )
+        if not ok:
+            return
+        agent = next((a for a in agents if a.label == label), None)
+        if agent is None:
+            self._show_install_error("install_bad_agent")
+            return
+        parent = self._pick_install_parent()
+        if not parent:
+            return
+        try:
+            target = resolve_clone_target(parent, preflight.repo)
+            prompt = agent_prompt(preflight, parent)
+            argv = agent_argv(agent, prompt)
+            preview = " ".join(argv[:-1]) + f' "{prompt}"'
+            if not self._confirm_install(preflight.repo, target, preview):
+                return
+            launch_agent_install(preflight, parent, agent)
+        except InstallError as exc:
+            self._show_install_error(exc.code)
+            return
+        except OSError:
+            self._show_install_error("install_launch_failed")
+            return
+        self.gd_install_status.setText(self.t("install_started"))
+        if not self._for_test:
+            QMessageBox.information(self, self.t("install_confirm_title"), self.t("install_started"))
+
     def _open_github_detail(self, repo: str) -> None:
         self._gh_detail_repo = repo
+        self._install_preflight = None
+        self._install_probe_error = None
         self._populate_github_detail()
         self.goto("github_detail")
 
@@ -3873,6 +3995,7 @@ class UsageOverlay(QWidget):
         ]
         if proj.language:
             meta_bits.append(proj.language)
+        meta_bits.append(self._gh_price_text(proj))
         meta_bits.append(self.t(src_key))
         self.gd_meta.setText(" · ".join(meta_bits))
 
@@ -3900,6 +4023,7 @@ class UsageOverlay(QWidget):
         note.setWordWrap(True)
         self.gd_body.addWidget(note)
         self.gd_body.addStretch(1)
+        self._start_install_probe(proj.repo)
 
     def _append_weekly_projects(self, layout: QVBoxLayout | None = None) -> None:
         layout = layout if layout is not None else self.github_layout
@@ -3980,16 +4104,25 @@ class UsageOverlay(QWidget):
             mid = QVBoxLayout()
             mid.setSpacing(2)
             mid.setContentsMargins(0, 0, 0, 0)
+            title_row = QHBoxLayout()
+            title_row.setContentsMargins(0, 0, 0, 0)
+            title_row.setSpacing(6)
             title = QLabel(proj.title)
             title.setObjectName("ghTileTitle")
             title.setWordWrap(True)
+            price_lbl = QLabel(self._gh_price_text(proj))
+            price_lbl.setObjectName("ghPriceChip")
+            price_lbl.setProperty("tier", proj.pricing)
+            price_lbl.setToolTip(self.t("gh_price_hint"))
             repo = QLabel(proj.repo)
             repo.setObjectName("ghTileRepo")
             blurb = QLabel(self._gh_desc(proj) or self.t("gh_no_desc"))
             blurb.setObjectName("ghTileBody")
             blurb.setWordWrap(True)
             blurb.setMaximumHeight(34)
-            mid.addWidget(title)
+            title_row.addWidget(title, 1)
+            title_row.addWidget(price_lbl, 0, Qt.AlignTop)
+            mid.addLayout(title_row)
             mid.addWidget(repo)
             mid.addWidget(blurb)
 
@@ -4493,7 +4626,14 @@ class UsageOverlay(QWidget):
 
     def request_close(self) -> None:
         self._quitting = True
-        for w in (self._worker, self._coach_worker, self._gh_worker, self._gh_loc_worker, *self._fav_workers):
+        for w in (
+            self._worker,
+            self._coach_worker,
+            self._gh_worker,
+            self._gh_loc_worker,
+            *self._install_workers,
+            *self._fav_workers,
+        ):
             if w and w.isRunning():
                 w.requestInterruption()
                 w.wait(800)

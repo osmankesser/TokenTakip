@@ -2,12 +2,16 @@
 
 ponytail: unauthenticated search (60/saat). Ağ yoksa weekly_projects yedek.
 Kurulum metinleri README scrape değil; dil/kategori sezgisel şablon.
+Kök manifest listesi Contents API’den; rastgele README komutu yok.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,11 +19,27 @@ from typing import Any
 from urllib.parse import quote_plus
 
 from platform_util import app_cache_dir
-from usage_client import _SafeError, _json_get
+from usage_client import _API_OPENER, _SafeError, _assert_api_url, _json_get
 
 CACHE_NAME = "github_top100.json"
 CACHE_TTL_SEC = 6 * 3600  # 6 saat
 TOP_N = 100
+
+ROOT_MANIFEST_NAMES = frozenset(
+    {
+        "package.json",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "pyproject.toml",
+        "requirements.txt",
+        "setup.py",
+        "Pipfile",
+        "go.mod",
+        "Cargo.toml",
+        "Cargo.lock",
+    }
+)
 
 # Arama dilimleri — çeşitlilik; birleşince yıldız sırası
 _SEARCH_QUERIES: tuple[str, ...] = (
@@ -31,6 +51,22 @@ _SEARCH_QUERIES: tuple[str, ...] = (
     "cursorrules OR continue.dev stars:>100",
     "topic:rag stars:>500 language:Python",
     "topic:ollama stars:>200",
+)
+
+PRICING_TIERS = frozenset({"free", "partial", "paid", "unknown"})
+_PARTIAL_PRICING = re.compile(
+    r"\b(?:freemium|in[- ]app purchases?|free trial)\b",
+    re.IGNORECASE,
+)
+_PAID_PRICING = re.compile(
+    r"\b(?:paid(?:[- ]only)?|subscriptions?|subscription required|"
+    r"premium(?: plan| tier| version)?|commercial license|"
+    r"enterprise (?:edition|plan|tier)|pro (?:plan|tier))\b",
+    re.IGNORECASE,
+)
+_FREE_PRICING = re.compile(
+    r"\b(?:free (?:and )?open[- ]source|open[- ]source|foss|free software|self[- ]hosted)\b",
+    re.IGNORECASE,
 )
 
 
@@ -48,6 +84,7 @@ class LiveProject:
     agents: tuple[str, ...] = ()
     mcp_tags: tuple[str, ...] = ()
     skill_tags: tuple[str, ...] = ()
+    pricing: str = "unknown"  # free | partial | paid | unknown
 
     @property
     def url(self) -> str:
@@ -240,6 +277,86 @@ def _search(q: str, *, per_page: int = 30) -> list[dict[str, Any]]:
     return [x for x in (items or []) if isinstance(x, dict)]
 
 
+def _github_json(url: str) -> Any:
+    """GET api.github.com — dict veya list (Contents API dizi döner)."""
+    _assert_api_url(url)
+    req = urllib.request.Request(
+        url,
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "TokenTracker"},
+        method="GET",
+    )
+    try:
+        with _API_OPENER.open(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8")
+    except _SafeError:
+        raise
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise _SafeError("error.not_found") from None
+        if exc.code in (401, 403):
+            raise _SafeError("error.auth") from None
+        raise _SafeError("error.http") from None
+    except (urllib.error.URLError, OSError):
+        raise _SafeError("error.network") from None
+    if not raw.strip():
+        return []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        raise _SafeError("error.http") from None
+    return data
+
+
+def fetch_root_manifests(repo: str) -> frozenset[str]:
+    """Kök dizindeki bilinen manifest/kilit adları — README komutu yok."""
+    from project_installer import assert_repo
+
+    clean = assert_repo(repo)
+    url = f"https://api.github.com/repos/{clean}/contents/"
+    try:
+        data = _github_json(url)
+    except _SafeError:
+        return frozenset()
+    if not isinstance(data, list):
+        return frozenset()
+    names: set[str] = set()
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("type") or "") != "file":
+            continue
+        name = str(item.get("name") or "").strip()
+        if name in ROOT_MANIFEST_NAMES:
+            names.add(name)
+    return frozenset(names)
+
+
+def classify_pricing(item: dict[str, Any]) -> str:
+    """GitHub lisansı/açıklamasından temkinli fiyat etiketi üret."""
+    license_data = item.get("license")
+    spdx = (
+        str(license_data.get("spdx_id") or "").upper()
+        if isinstance(license_data, dict)
+        else ""
+    )
+    open_source = bool(spdx and spdx not in {"NOASSERTION", "OTHER"})
+    blob = " ".join(
+        (
+            str(item.get("name") or ""),
+            str(item.get("full_name") or ""),
+            str(item.get("description") or ""),
+            " ".join(str(topic) for topic in (item.get("topics") or ()) if topic),
+        )
+    )
+    open_source = open_source or bool(_FREE_PRICING.search(blob))
+    if _PARTIAL_PRICING.search(blob):
+        return "partial"
+    paid = bool(_PAID_PRICING.search(blob))
+    if paid:
+        return "partial" if open_source else "paid"
+    return "free" if open_source else "unknown"
+
+
 def _item_to_proj(item: dict[str, Any], rank: int, source: str) -> LiveProject | None:
     full = str(item.get("full_name") or "").strip()
     if "/" not in full:
@@ -262,6 +379,7 @@ def _item_to_proj(item: dict[str, Any], rank: int, source: str) -> LiveProject |
         source=source,
         agents=("cursor", "claude", "codex"),
         mcp_tags=("mcp",) if cat == "mcp" else (),
+        pricing=classify_pricing(item),
     )
 
 
@@ -305,6 +423,7 @@ def _save_cache(projects: list[LiveProject]) -> None:
                 "stars": p.stars,
                 "language": p.language,
                 "topics": list(p.topics),
+                "pricing": p.pricing,
             }
             for p in projects
         ],
@@ -339,6 +458,11 @@ def _load_cache(*, max_age: float | None = CACHE_TTL_SEC) -> list[LiveProject] |
                     language=str(it.get("language") or ""),
                     topics=tuple(it.get("topics") or ()),
                     source="cache",
+                    pricing=(
+                        str(it.get("pricing"))
+                        if str(it.get("pricing") or "") in PRICING_TIERS
+                        else "unknown"
+                    ),
                 )
             )
         return out[:TOP_N] if out else None

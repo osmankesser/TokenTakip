@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QSettings
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
@@ -109,9 +109,69 @@ def main() -> int:
     check("Ana sayfa kota", win._page == "usage")
     check("Nav pill aktif bubble", win.home_btn._active is True)
 
+    from unittest import mock
+
+    from github_live import LiveProject
+    from project_installer import AGENT_CLIS, evaluate_install
+
+    sample = LiveProject(
+        rank=1,
+        repo="acme/demo",
+        title="demo",
+        cat="tools",
+        description="test",
+        stars=1,
+        language="Python",
+        source="fallback",
+        pricing="free",
+    )
+    win._gh_projects = [sample]
+    win._fill_github_list_only()
+    app.processEvents()
+    price_chips = win.github_inner.findChildren(QLabel, "ghPriceChip")
+    check("GitHub fiyat etiketi", len(price_chips) == 1 and price_chips[0].text() == win.t("gh_price_free"))
+    with mock.patch("overlay.probe_repo") as probe:
+        probe.side_effect = AssertionError("test must not call probe_repo / network")
+        win._open_github_detail("acme/demo")
+        app.processEvents()
+    check("GitHub detay", win._page == "github_detail")
+    check("Kurulum düğmeleri başlangıçta gizli", (not win.gd_install_term.isVisible()) and (not win.gd_install_agent.isVisible()))
+
+    missing = evaluate_install("acme/demo", ["package.json", "package-lock.json"], tools=(), agents=())
+    win._apply_install_probe("acme/demo", missing)
+    app.processEvents()
+    check("Eksik araçta terminal gizli", not win.gd_install_term.isVisible())
+    check("Eksik araçta ajan gizli", not win.gd_install_agent.isVisible())
+
+    agent_only = evaluate_install("acme/demo", ["README.md"], tools={"git"}, agents=(AGENT_CLIS[0],))
+    win._apply_install_probe("acme/demo", agent_only)
+    app.processEvents()
+    check("Tarifsiz ajan düğmesi", win.gd_install_agent.isVisible() and not win.gd_install_term.isVisible())
+
+    ready = evaluate_install(
+        "acme/demo",
+        ["package.json", "package-lock.json"],
+        tools={"git", "npm"},
+        agents=(),
+    )
+    win._apply_install_probe("acme/demo", ready)
+    app.processEvents()
+    check("Hazır terminal düğmesi", win.gd_install_term.isVisible() and not win.gd_install_agent.isVisible())
+
+    launched: list[object] = []
+    with (
+        mock.patch.object(win, "_pick_install_parent", return_value=tmp.name),
+        mock.patch.object(win, "_confirm_install", return_value=True),
+        mock.patch("overlay.launch_terminal_install", side_effect=lambda *a, **k: launched.append(a) or Path(tmp.name) / "demo"),
+        mock.patch("project_installer.subprocess.Popen") as popen,
+    ):
+        win._install_via_terminal()
+        app.processEvents()
+        check("Terminal kurulum mock", len(launched) == 1)
+        check("Gerçek Popen yok", not popen.called)
+
     win.stamp.setText("eski")
     win._quota_access = True
-    from unittest import mock
 
     with mock.patch("overlay.FetchWorker") as FW:
         worker = mock.Mock()

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from datetime import date
+from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
+import agent_story
 
 from agent_catalog import discover_agent_kits
 from agent_story import build_agent_story
@@ -46,9 +49,43 @@ class QueueFeaturesTests(unittest.TestCase):
         self.assertGreaterEqual(len(groups), 4)
         self.assertIn("mcp", [c for c, _ in groups])
 
-    def test_agent_story_need_chat(self) -> None:
-        s = build_agent_story("CURSOR", allow_chat=False)
-        self.assertEqual(s.note, "need_chat")
+    def test_github_pricing_classification_is_conservative(self) -> None:
+        from github_live import classify_pricing
+
+        self.assertEqual(classify_pricing({"license": {"spdx_id": "MIT"}}), "free")
+        self.assertEqual(
+            classify_pricing(
+                {
+                    "description": "Open-source core with premium plans",
+                    "license": {"spdx_id": "Apache-2.0"},
+                }
+            ),
+            "partial",
+        )
+        self.assertEqual(
+            classify_pricing({"description": "Requires a paid subscription"}),
+            "paid",
+        )
+        self.assertEqual(
+            classify_pricing({"description": "Free download with in-app purchases"}),
+            "partial",
+        )
+        self.assertEqual(classify_pricing({"description": "AI coding assistant"}), "unknown")
+
+    def test_agent_story_counts_files_without_reading_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "one.jsonl").write_text("not transcript data", encoding="utf-8")
+            (root / "two.jsonl").write_bytes(b"\xff\xfe")
+            old = agent_story._SOURCE_ROOTS["Cursor"]
+            agent_story._SOURCE_ROOTS["Cursor"] = [(root, "*.jsonl")]
+            try:
+                story = build_agent_story("CURSOR", allow_chat=False)
+            finally:
+                agent_story._SOURCE_ROOTS["Cursor"] = old
+        self.assertEqual(story.sessions, 2)
+        self.assertEqual(story.note, "")
+        self.assertEqual(set(vars(story)), {"source", "provider", "sessions", "note"})
 
     def test_catalog_nonempty(self) -> None:
         kits = discover_agent_kits()

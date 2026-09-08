@@ -52,7 +52,7 @@ def main() -> int:
             print("flag assets failed", file=sys.stderr)
             return rc
     steps = (
-        ([str(PY), "-m", "unittest", "test_privacy", "test_license", "test_buttons", "-q"], "test"),
+        ([str(PY), "-m", "unittest", "test_privacy", "test_license", "test_project_installer", "-q"], "test"),
         (
             [str(PI), "-y", "--distpath", "release_out", "--workpath", "build_out", "TokenTracker_onedir.spec"],
             "pyinstaller",

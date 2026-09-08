@@ -9,9 +9,10 @@ Proje kökü: `D:\token tracker`
 | `overlay.py` | Ana uygulama (UI) |
 | `usage_client.py` | Kota okuma |
 | `prompt_coach.py` | Öneriler |
+| `github_live.py`, `project_installer.py` | GitHub Top 100 + güvenli kurulum |
 | `lang_packs.py`, `lang_packs_data.py` | Çeviriler |
 | `meter_texts.py` | Kota metinleri |
-| `version.py` | Sürüm (0.1.5) |
+| `version.py` | Sürüm (0.1.5.003) |
 | `assets/flags/*.png` | Dil bayrakları (21 adet) |
 | `logo.png`, `logo.ico` | Uygulama simgesi |
 | `LISANS-SOZLESMESI.txt`, `LICENSE` | Lisans |
@@ -23,7 +24,7 @@ Proje kökü: `D:\token tracker`
 | `_fetch_flag_assets.py`, `_prune_exes.py`, `_purge_legacy.py` | Bakım |
 | `test_*.py` | Testler |
 | `TokenTracker.exe` + `_internal/` | Çalışan program |
-| `release/TokenTracker-0.1.5-win64.zip` | İnternet yayını |
+| `release/TokenTracker-0.1.5.003-win64.zip` | İnternet yayını |
 | `baslat.bat`, `README.md`, `AGENTS.md` | Kullanım |
 
 ## Gereksiz — silinir / üretilmez
@@ -41,4 +42,4 @@ Proje kökü: `D:\token tracker`
 .venv\Scripts\python.exe _build_deploy.py
 ```
 
-Yüklenecek dosya: `release\TokenTracker-0.1.5-win64.zip`
+Yüklenecek dosya: `release\TokenTracker-0.1.5.003-win64.zip`
